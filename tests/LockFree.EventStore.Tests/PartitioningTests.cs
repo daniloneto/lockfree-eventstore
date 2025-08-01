@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using LockFree.EventStore;
 using Xunit;
 
 namespace LockFree.EventStore.Tests;

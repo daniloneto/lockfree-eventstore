@@ -13,6 +13,6 @@ jobs:
         with:
           dotnet-version: '9.0.100-preview.4.24266.19'
       - name: Pack
-        run: dotnet pack src/LockFree.EventStore/LockFree.EventStore.csproj -c Release -p:Version=${{ github.ref_name#v }} -o dist
+        run: dotnet pack src/LockFree.EventStore/LockFree.EventStore.csproj -c Release -p:Version=${GITHUB_REF_NAME#v} -o dist
       - name: Publish
         run: dotnet nuget push "dist/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
