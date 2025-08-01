@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-dotnet@v3
         with:
-          dotnet-version: '9.0.100-preview.4.24266.19'
+          dotnet-version: 9.0.x
       - name: Pack
         run: dotnet pack src/LockFree.EventStore/LockFree.EventStore.csproj -c Release -p:Version=${GITHUB_REF_NAME#v} -o dist
       - name: Publish
