@@ -1,0 +1,18 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: 9.0.x
+      - name: Pack
+        run: dotnet pack src/LockFree.EventStore/LockFree.EventStore.csproj -c Release -p:Version=${GITHUB_REF_NAME#v} -o dist
+      - name: Publish
+        run: dotnet nuget push "dist/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
