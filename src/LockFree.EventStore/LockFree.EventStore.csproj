@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Description>Event store em memória lock-free, genérico, com capacidade fixa, particionado e agregações funcionais.</Description>
+    <PackageId>LockFree.EventStore</PackageId>
+    <Authors>lockfree-eventstore</Authors>
+    <PackageTags>dotnet;eventstore;lock-free;concurrency;in-memory;partitioning;aot;trimming</PackageTags>
+    <RepositoryUrl>https://example.com/lockfree-eventstore</RepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+</Project>
