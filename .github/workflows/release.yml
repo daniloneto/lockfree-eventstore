@@ -1,18 +1,41 @@
 name: Release
-
 on:
-  push:
+  push:    
     tags: [ 'v*' ]
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-dotnet@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 9.0.x
+      
+      - name: Extract version from tag
+        id: ver
+        run: echo "value=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      # 3) Pack com a versão vinda da tag
       - name: Pack
-        run: dotnet pack src/LockFree.EventStore/LockFree.EventStore.csproj -c Release -p:Version=${GITHUB_REF_NAME#v} -o dist
-      - name: Publish
-        run: dotnet nuget push "dist/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
+        run: >
+          dotnet pack src/LockFree.EventStore/LockFree.EventStore.csproj
+          -c Release
+          -o .artifacts
+          /p:ContinuousIntegrationBuild=true
+          /p:Version=${{ steps.ver.outputs.value }}
+
+      # 4) Publica .nupkg
+      - name: Push NuGet package
+        run: >
+          dotnet nuget push ".artifacts/*.nupkg"
+          --source https://api.nuget.org/v3/index.json
+          --api-key ${{ secrets.LOCKFREE }}
+          --skip-duplicate
+      
+      - name: Push Symbols
+        run: >
+          dotnet nuget push ".artifacts/*.snupkg"
+          --source https://api.nuget.org/v3/index.json
+          --api-key ${{ secrets.LOCKFREE }}
+          --skip-duplicate
