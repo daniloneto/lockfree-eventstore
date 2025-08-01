@@ -18,6 +18,23 @@ var total = store.Aggregate(() => 0m, (acc, e) => acc + e.Amount,
     from: DateTime.UtcNow.AddMinutes(-10));
 ```
 
+## Samples
+
+### MetricsDashboard
+API web completa para coleta e consulta de métricas em tempo real:
+
+```bash
+cd .\samples\MetricsDashboard\
+dotnet run
+```
+
+Endpoints disponíveis:
+- `POST /metrics` - Adicionar métrica
+- `GET /metrics/sum?label=cpu_usage` - Somar valores por label
+- `GET /metrics/top?k=5` - Top K métricas
+
+Veja `samples/MetricsDashboard/TESTING.md` para guia completo de testes.
+
 ## Partitions
 O número de partições padrão é `Environment.ProcessorCount`. É possível forçar a partição usando `TryAppend(e, partition)`.
 

@@ -1,5 +1,4 @@
 using LockFree.EventStore;
-using LockFree.EventStore.Tests; // reuse MetricEvent models
 
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();

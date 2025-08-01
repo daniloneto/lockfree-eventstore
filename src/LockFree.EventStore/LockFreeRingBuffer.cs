@@ -26,12 +26,10 @@ public sealed class LockFreeRingBuffer<T>
     /// <summary>
     /// Total capacity.
     /// </summary>
-    public int Capacity => _capacity;
-
-    /// <summary>
+    public int Capacity => _capacity;    /// <summary>
     /// Approximate count of items currently in the buffer.
     /// </summary>
-    public long CountApprox => Volatile.Read(ref _tail) - Volatile.Read(ref _head);
+    public long CountApprox => Math.Max(0, Math.Min(_capacity, Volatile.Read(ref _tail) - Volatile.Read(ref _head)));
 
     /// <summary>
     /// Enqueues a single item, overwriting the oldest if necessary.

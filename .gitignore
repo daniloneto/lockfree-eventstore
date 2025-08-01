@@ -1,0 +1,47 @@
+# .gitignore for lockfree-eventstore (dotnet/C#)
+
+# Build results
+bin/
+obj/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Visual Studio Code
+.vscode/
+
+# Rider
+.idea/
+*.sln.iml
+
+# NuGet
+*.nupkg
+# NuGet Packages folder
+packages/
+# Project lock files
+project.lock.json
+
+# Others
+*.log
+*.DS_Store
+Thumbs.db
+
+# Test results
+TestResults/
+
+# Temporary files
+*.tmp
+*.bak
+
+# OS generated files
+.DS_Store
+*.swp
+
+# Ignore coverage reports
+coverage*
+
+# Ignore generated files
+*.generated.cs
