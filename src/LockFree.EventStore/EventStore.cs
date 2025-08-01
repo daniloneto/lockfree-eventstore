@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Numerics;
 using System.Threading;
 
 namespace LockFree.EventStore;
@@ -10,25 +11,59 @@ public sealed class EventStore<TEvent>
 {
     private readonly LockFreeRingBuffer<TEvent>[] _partitions;
     private readonly IEventTimestampSelector<TEvent>? _ts;
+    private readonly EventStoreOptions<TEvent> _options;
+    private readonly EventStoreStatistics _statistics;
+
+    /// <summary>
+    /// Initializes a new instance with default options.
+    /// </summary>
+    public EventStore() : this(null) { }
+
+    /// <summary>
+    /// Initializes a new instance with specified capacity.
+    /// </summary>
+    public EventStore(int capacity) : this(new EventStoreOptions<TEvent> { Capacity = capacity }) { }
+
+    /// <summary>
+    /// Initializes a new instance with specified capacity and partitions.
+    /// </summary>
+    public EventStore(int capacity, int partitions) : this(new EventStoreOptions<TEvent> 
+    { 
+        Capacity = capacity, 
+        Partitions = partitions 
+    }) { }
 
     /// <summary>
     /// Initializes a new instance with the provided options.
     /// </summary>
     public EventStore(EventStoreOptions<TEvent>? options = null)
     {
-        options ??= new EventStoreOptions<TEvent>();
-        if (options.Partitions <= 0)
-            throw new ArgumentOutOfRangeException(nameof(options.Partitions));
-        _partitions = new LockFreeRingBuffer<TEvent>[options.Partitions];
-        for (int i = 0; i < _partitions.Length; i++)
-            _partitions[i] = new LockFreeRingBuffer<TEvent>(options.CapacityPerPartition);
-        _ts = options.TimestampSelector;
-    }
+        _options = options ?? new EventStoreOptions<TEvent>();
+        if (_options.Partitions <= 0)
+            throw new ArgumentOutOfRangeException(nameof(_options.Partitions));
+        
+        _statistics = new EventStoreStatistics();
+        _partitions = new LockFreeRingBuffer<TEvent>[_options.Partitions];
+        
+        var capacityPerPartition = _options.Capacity.HasValue 
+            ? Math.Max(1, _options.Capacity.Value / _options.Partitions)
+            : _options.CapacityPerPartition;
 
-    /// <summary>
+        for (int i = 0; i < _partitions.Length; i++)
+        {
+            _partitions[i] = new LockFreeRingBuffer<TEvent>(
+                capacityPerPartition, 
+                _options.OnEventDiscarded != null ? OnEventDiscardedInternal : null);
+        }
+        
+        _ts = _options.TimestampSelector;
+    }    /// <summary>
     /// Number of partitions.
     /// </summary>
-    public int Partitions => _partitions.Length;
+    public int Partitions => _partitions.Length;    /// <summary>
+    /// Total configured capacity across all partitions.
+    /// </summary>
+    public int Capacity => _partitions.Sum(p => p.Capacity);
 
     /// <summary>
     /// Approximate total number of events across partitions.
@@ -45,15 +80,40 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
+    /// Approximate total number of events across partitions (alias for CountApprox).
+    /// </summary>
+    public long Count => CountApprox;
+
+    /// <summary>
+    /// Whether the store is empty (approximate).
+    /// </summary>
+    public bool IsEmpty => _partitions.All(p => p.IsEmpty);
+
+    /// <summary>
+    /// Whether the store is at full capacity (approximate).
+    /// </summary>
+    public bool IsFull => _partitions.Any(p => p.IsFull);
+
+    /// <summary>
+    /// Statistics and metrics for this store.
+    /// </summary>
+    public EventStoreStatistics Statistics => _statistics;
+
+    private void OnEventDiscardedInternal(TEvent evt)
+    {
+        _statistics.RecordDiscard();
+        _options.OnEventDiscarded?.Invoke(evt);
+        
+        if (IsFull)
+            _options.OnCapacityReached?.Invoke();
+    }    /// <summary>
     /// Appends an event using the default partitioner.
     /// </summary>
     public bool TryAppend(TEvent e)
     {
         var partition = Partitioners.ForKey(e, _partitions.Length);
         return TryAppend(e, partition);
-    }
-
-    /// <summary>
+    }/// <summary>
     /// Appends a batch of events using the default partitioner.
     /// </summary>
     public int TryAppend(ReadOnlySpan<TEvent> batch)
@@ -61,8 +121,8 @@ public sealed class EventStore<TEvent>
         int written = 0;
         foreach (var e in batch)
         {
-            TryAppend(e);
-            written++;
+            if (TryAppend(e))
+                written++;
         }
         return written;
     }
@@ -74,10 +134,62 @@ public sealed class EventStore<TEvent>
     {
         if ((uint)partition >= (uint)_partitions.Length)
             throw new ArgumentOutOfRangeException(nameof(partition));
-        return _partitions[partition].TryEnqueue(e);
+        var result = _partitions[partition].TryEnqueue(e);
+        if (result)
+            _statistics.RecordAppend();
+        return result;
     }
 
     /// <summary>
+    /// Clears all events from the store.
+    /// </summary>
+    public void Clear()
+    {
+        foreach (var partition in _partitions)
+        {
+            partition.Clear();
+        }
+        _statistics.Reset();
+    }
+
+    /// <summary>
+    /// Resets the store (alias for Clear).
+    /// </summary>
+    public void Reset()
+    {
+        Clear();
+    }    /// <summary>
+    /// Purges events older than the specified timestamp.
+    /// Requires a TimestampSelector to be configured.
+    /// </summary>
+    public void Purge(DateTime olderThan)
+    {
+        if (_ts == null)
+            throw new InvalidOperationException("TimestampSelector must be configured to use Purge.");
+
+        // Get all current events that should be kept
+        var eventsToKeep = new List<TEvent>();
+        foreach (var evt in EnumerateSnapshot())
+        {
+            if (_ts.GetTimestamp(evt) >= olderThan)
+            {
+                eventsToKeep.Add(evt);
+            }
+        }
+
+        // Clear the store without affecting statistics
+        foreach (var partition in _partitions)
+        {
+            partition.Clear();
+        }
+
+        // Re-add the events we want to keep without incrementing statistics
+        foreach (var evt in eventsToKeep)
+        {
+            var partition = Partitioners.ForKey(evt, _partitions.Length);
+            _partitions[partition].TryEnqueue(evt);
+        }
+    }/// <summary>
     /// Takes a snapshot of all partitions and returns an immutable list.
     /// </summary>
     public IReadOnlyList<TEvent> Snapshot()
@@ -102,6 +214,30 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
+    /// Takes a filtered snapshot based on the provided predicate.
+    /// </summary>
+    public IReadOnlyList<TEvent> Snapshot(Func<TEvent, bool> filter)
+    {
+        return Query(filter).ToList();
+    }
+
+    /// <summary>
+    /// Takes a snapshot of events within the specified time window.
+    /// </summary>
+    public IReadOnlyList<TEvent> Snapshot(DateTime? from = null, DateTime? to = null)
+    {
+        return Query(from: from, to: to).ToList();
+    }
+
+    /// <summary>
+    /// Takes a filtered snapshot within the specified time window.
+    /// </summary>
+    public IReadOnlyList<TEvent> Snapshot(Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    {
+        return Query(filter, from, to).ToList();
+    }
+
+    /// <summary>
     /// Returns an enumerable snapshot of all events.
     /// </summary>
     public IEnumerable<TEvent> EnumerateSnapshot()
@@ -123,9 +259,7 @@ public sealed class EventStore<TEvent>
         if (to.HasValue && ts > to.Value)
             return false;
         return true;
-    }
-
-    /// <summary>
+    }    /// <summary>
     /// Queries events by optional filter and time window.
     /// </summary>
     public IEnumerable<TEvent> Query(Predicate<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
@@ -143,6 +277,150 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
+    /// Queries events by filter function and time window.
+    /// </summary>
+    public IEnumerable<TEvent> Query(Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    {
+        return Query(filter != null ? new Predicate<TEvent>(filter) : null, from, to);
+    }    /// <summary>
+    /// Counts events within the specified time window.
+    /// </summary>
+    public long CountEvents(DateTime? from = null, DateTime? to = null)
+    {
+        return Query(from: from, to: to).LongCount();
+    }
+
+    /// <summary>
+    /// Counts events matching the filter within the specified time window.
+    /// </summary>
+    public long CountEvents(Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    {
+        return Query(filter, from, to).LongCount();
+    }
+
+    /// <summary>
+    /// Sums values extracted from events within the specified time window.
+    /// </summary>
+    public TResult Sum<TResult>(Func<TEvent, TResult> selector, DateTime? from = null, DateTime? to = null)
+        where TResult : struct, INumber<TResult>
+    {
+        var sum = TResult.Zero;
+        foreach (var evt in Query(from: from, to: to))
+        {
+            sum += selector(evt);
+        }
+        return sum;
+    }
+
+    /// <summary>
+    /// Sums values extracted from filtered events within the specified time window.
+    /// </summary>
+    public TResult Sum<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+        where TResult : struct, INumber<TResult>
+    {
+        var sum = TResult.Zero;
+        foreach (var evt in Query(filter, from, to))
+        {
+            sum += selector(evt);
+        }
+        return sum;
+    }
+
+    /// <summary>
+    /// Calculates the average of values extracted from events within the specified time window.
+    /// </summary>
+    public double Average<TValue>(Func<TEvent, TValue> selector, DateTime? from = null, DateTime? to = null)
+        where TValue : struct, INumber<TValue>
+    {
+        var sum = TValue.Zero;
+        long count = 0;
+        foreach (var evt in Query(from: from, to: to))
+        {
+            sum += selector(evt);
+            count++;
+        }
+        return count == 0 ? 0.0 : Convert.ToDouble(sum) / count;
+    }
+
+    /// <summary>
+    /// Calculates the average of values extracted from filtered events within the specified time window.
+    /// </summary>
+    public double Average<TValue>(Func<TEvent, TValue> selector, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+        where TValue : struct, INumber<TValue>
+    {
+        var sum = TValue.Zero;
+        long count = 0;
+        foreach (var evt in Query(filter, from, to))
+        {
+            sum += selector(evt);
+            count++;
+        }
+        return count == 0 ? 0.0 : Convert.ToDouble(sum) / count;
+    }
+
+    /// <summary>
+    /// Finds the minimum value extracted from events within the specified time window.
+    /// </summary>
+    public TResult? Min<TResult>(Func<TEvent, TResult> selector, DateTime? from = null, DateTime? to = null)
+        where TResult : struct, IComparable<TResult>
+    {
+        TResult? min = null;
+        foreach (var evt in Query(from: from, to: to))
+        {
+            var value = selector(evt);
+            if (!min.HasValue || value.CompareTo(min.Value) < 0)
+                min = value;
+        }
+        return min;
+    }
+
+    /// <summary>
+    /// Finds the minimum value extracted from filtered events within the specified time window.
+    /// </summary>
+    public TResult? Min<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+        where TResult : struct, IComparable<TResult>
+    {
+        TResult? min = null;
+        foreach (var evt in Query(filter, from, to))
+        {
+            var value = selector(evt);
+            if (!min.HasValue || value.CompareTo(min.Value) < 0)
+                min = value;
+        }
+        return min;
+    }
+
+    /// <summary>
+    /// Finds the maximum value extracted from events within the specified time window.
+    /// </summary>
+    public TResult? Max<TResult>(Func<TEvent, TResult> selector, DateTime? from = null, DateTime? to = null)
+        where TResult : struct, IComparable<TResult>
+    {
+        TResult? max = null;
+        foreach (var evt in Query(from: from, to: to))
+        {
+            var value = selector(evt);
+            if (!max.HasValue || value.CompareTo(max.Value) > 0)
+                max = value;
+        }
+        return max;
+    }
+
+    /// <summary>
+    /// Finds the maximum value extracted from filtered events within the specified time window.
+    /// </summary>
+    public TResult? Max<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+        where TResult : struct, IComparable<TResult>
+    {
+        TResult? max = null;
+        foreach (var evt in Query(filter, from, to))
+        {
+            var value = selector(evt);
+            if (!max.HasValue || value.CompareTo(max.Value) > 0)
+                max = value;
+        }
+        return max;
+    }    /// <summary>
     /// Aggregates all events using the specified fold function.
     /// </summary>
     public TAcc Aggregate<TAcc>(Func<TAcc> seed, Func<TAcc, TEvent, TAcc> fold, Predicate<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
@@ -153,6 +431,14 @@ public sealed class EventStore<TEvent>
             acc = fold(acc, e);
         }
         return acc;
+    }
+
+    /// <summary>
+    /// Aggregates events using the specified fold function with a filter function.
+    /// </summary>
+    public TAcc Aggregate<TAcc>(Func<TAcc> seed, Func<TAcc, TEvent, TAcc> fold, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    {
+        return Aggregate(seed, fold, filter != null ? new Predicate<TEvent>(filter) : null, from, to);
     }
 
     /// <summary>
@@ -173,5 +459,14 @@ public sealed class EventStore<TEvent>
             dict[key] = fold(acc, e);
         }
         return dict;
+    }
+
+    /// <summary>
+    /// Aggregates events grouped by a key with a filter function.
+    /// </summary>
+    public Dictionary<TKey, TAcc> AggregateBy<TKey, TAcc>(Func<TEvent, TKey> groupBy, Func<TAcc> seed, Func<TAcc, TEvent, TAcc> fold, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+        where TKey : notnull
+    {
+        return AggregateBy(groupBy, seed, fold, filter != null ? new Predicate<TEvent>(filter) : null, from, to);
     }
 }
