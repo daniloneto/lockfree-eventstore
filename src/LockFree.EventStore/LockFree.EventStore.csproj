@@ -3,9 +3,10 @@
     <TargetFramework>net9.0</TargetFramework>
     <Description>Event store em memória lock-free, genérico, com capacidade fixa, particionado e agregações funcionais.</Description>
     <PackageId>LockFree.EventStore</PackageId>
-    <Authors>lockfree-eventstore</Authors>
+    <Authors>Danilo Neto</Authors>
     <PackageTags>dotnet;eventstore;lock-free;concurrency;in-memory;partitioning;aot;trimming</PackageTags>
-    <RepositoryUrl>https://example.com/lockfree-eventstore</RepositoryUrl>
+    <RepositoryUrl>https://github.com/daniloneto/lockfree-eventstore</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <PackageReadmeFile>README.md</PackageReadmeFile>
