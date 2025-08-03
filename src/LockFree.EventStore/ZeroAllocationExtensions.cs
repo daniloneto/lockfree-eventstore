@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 
 namespace LockFree.EventStore;
@@ -120,6 +122,221 @@ public static class ZeroAllocationExtensions
             filter,
             from,
             to);
+    }    /// <summary>
+    /// Processes events in chunks without allocation using pooled buffers.
+    /// More efficient than ProcessEvents for very large datasets.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static TState ProcessEventsChunked<TEvent, TState>(
+        this EventStore<TEvent> store,
+        TState initialState,
+        Func<TState, ReadOnlySpan<TEvent>, TState> chunkProcessor,
+        EventFilter<TEvent>? filter = null,
+        DateTime? from = null,
+        DateTime? to = null,
+        int chunkSize = Buffers.DefaultChunkSize)
+    {
+        var state = initialState;
+        
+        if (filter != null)
+        {
+            store.SnapshotFilteredZeroAlloc(evt =>
+            {
+                var timestamp = store.TimestampSelector?.GetTimestamp(evt);
+                return filter(evt, timestamp);
+            }, chunk =>
+            {
+                state = chunkProcessor(state, chunk);
+            }, chunkSize);
+        }
+        else
+        {
+            store.SnapshotZeroAlloc(chunk =>
+            {
+                state = chunkProcessor(state, chunk);
+            }, chunkSize);
+        }
+        
+        return state;
+    }    /// <summary>
+    /// Sums numeric values from events without allocation using chunked processing.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double SumZeroAlloc<TEvent>(
+        this EventStore<TEvent> store,
+        Func<TEvent, double> selector,
+        EventFilter<TEvent>? filter = null,
+        DateTime? from = null,
+        DateTime? to = null)
+    {
+        return store.ProcessEventsChunked<TEvent, double>(
+            0.0,
+            (sum, chunk) =>
+            {
+                foreach (var evt in chunk)
+                {
+                    sum += selector(evt);
+                }
+                return sum;
+            },
+            filter,
+            from,
+            to);
+    }
+
+    /// <summary>
+    /// Finds minimum value from events without allocation.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static TResult? MinZeroAlloc<TEvent, TResult>(
+        this EventStore<TEvent> store,
+        Func<TEvent, TResult> selector,
+        EventFilter<TEvent>? filter = null,
+        DateTime? from = null,
+        DateTime? to = null)
+        where TResult : struct, IComparable<TResult>
+    {
+        var result = store.ProcessEventsChunked<TEvent, (bool HasValue, TResult Min)>(
+            (false, default(TResult)),
+            (state, chunk) =>
+            {
+                foreach (var evt in chunk)
+                {
+                    var value = selector(evt);
+                    if (!state.HasValue || value.CompareTo(state.Min) < 0)
+                    {
+                        state = (true, value);
+                    }
+                }
+                return state;
+            },
+            filter,
+            from,
+            to);
+        
+        return result.HasValue ? result.Min : null;
+    }
+
+    /// <summary>
+    /// Finds maximum value from events without allocation.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static TResult? MaxZeroAlloc<TEvent, TResult>(
+        this EventStore<TEvent> store,
+        Func<TEvent, TResult> selector,
+        EventFilter<TEvent>? filter = null,
+        DateTime? from = null,
+        DateTime? to = null)
+        where TResult : struct, IComparable<TResult>
+    {
+        var result = store.ProcessEventsChunked<TEvent, (bool HasValue, TResult Max)>(
+            (false, default(TResult)),
+            (state, chunk) =>
+            {
+                foreach (var evt in chunk)
+                {
+                    var value = selector(evt);
+                    if (!state.HasValue || value.CompareTo(state.Max) > 0)
+                    {
+                        state = (true, value);
+                    }
+                }
+                return state;
+            },
+            filter,
+            from,
+            to);
+        
+        return result.HasValue ? result.Max : null;
+    }    /// <summary>
+    /// Calculates average of numeric values from events without allocation.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double AverageZeroAlloc<TEvent>(
+        this EventStore<TEvent> store,
+        Func<TEvent, double> selector,
+        EventFilter<TEvent>? filter = null,
+        DateTime? from = null,
+        DateTime? to = null)
+    {
+        var result = store.ProcessEventsChunked<TEvent, (double Sum, long Count)>(
+            (0.0, 0L),
+            (state, chunk) =>
+            {
+                foreach (var evt in chunk)
+                {
+                    state.Sum += selector(evt);
+                    state.Count++;
+                }
+                return state;
+            },
+            filter,
+            from,
+            to);
+        
+        return result.Count > 0 ? result.Sum / result.Count : 0.0;
+    }
+
+    /// <summary>
+    /// Groups events by key without allocation, processing results in chunks.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void GroupByZeroAlloc<TEvent, TKey>(
+        this EventStore<TEvent> store,
+        Func<TEvent, TKey> keySelector,
+        Action<ReadOnlySpan<KeyValuePair<TKey, List<TEvent>>>> processor,
+        EventFilter<TEvent>? filter = null,
+        DateTime? from = null,
+        DateTime? to = null,
+        int chunkSize = Buffers.DefaultChunkSize)
+        where TKey : notnull
+    {
+        var groups = new Dictionary<TKey, List<TEvent>>();
+        
+        store.ProcessEventsChunked<TEvent, Dictionary<TKey, List<TEvent>>>(
+            groups,
+            (currentGroups, chunk) =>
+            {
+                foreach (var evt in chunk)
+                {
+                    var key = keySelector(evt);
+                    if (!currentGroups.TryGetValue(key, out var list))
+                    {
+                        list = new List<TEvent>();
+                        currentGroups[key] = list;
+                    }
+                    list.Add(evt);
+                }
+                return currentGroups;
+            },
+            filter,
+            from,
+            to,
+            chunkSize);
+
+        // Output results in chunks
+        if (groups.Count > 0)
+        {
+            Buffers.WithRentedBuffer<KeyValuePair<TKey, List<TEvent>>>(chunkSize, buffer =>
+            {
+                var count = 0;
+                foreach (var kvp in groups)
+                {
+                    buffer[count++] = kvp;
+                    
+                    if (count >= buffer.Length)
+                    {
+                        processor(buffer.AsSpan(0, count));
+                        count = 0;
+                    }
+                }
+                
+                if (count > 0)
+                {
+                    processor(buffer.AsSpan(0, count));
+                }
+            }, ArrayPool<KeyValuePair<TKey, List<TEvent>>>.Shared);
+        }
     }
 
     /// <summary>

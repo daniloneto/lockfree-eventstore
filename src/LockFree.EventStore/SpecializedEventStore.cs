@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Numerics;
 using System.Threading;
@@ -453,76 +454,183 @@ public sealed class SpecializedEventStore
     }
 
     /// <summary>
-    /// Zero-allocation query with time filtering using chunked processing.
+    /// Zero-allocation snapshot using chunked processing with pooled buffers.
     /// </summary>
-    public void QueryZeroAlloc(Action<ReadOnlySpan<Event>> processor, DateTime? from = null, DateTime? to = null, int chunkSize = Buffers.DefaultChunkSize)
+    public void EnumerateSnapshotZeroAlloc(Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
     {
-        var fromTicks = from?.Ticks ?? long.MinValue;
-        var toTicks = to?.Ticks ?? long.MaxValue;
-        
-        Buffers.WithRentedBuffer<Event>(chunkSize, buffer =>
+        foreach (var partition in _partitions)
         {
-            var count = 0;
-            
-            foreach (var partition in _partitions)
-            {
-                foreach (var evt in partition.EnumerateSnapshot())
-                {
-                    if (evt.TimestampTicks >= fromTicks && evt.TimestampTicks <= toTicks)
-                    {
-                        buffer[count++] = evt;
-                        
-                        if (count >= chunkSize)
-                        {
-                            processor(buffer.AsSpan(0, count));
-                            count = 0;
-                        }
-                    }
-                }
-            }
-            
-            // Process remaining events
-            if (count > 0)
-            {
-                processor(buffer.AsSpan(0, count));
-            }
-        }, Buffers.EventPool);
+            partition.SnapshotZeroAlloc(processor, chunkSize);
+        }
     }
 
     /// <summary>
-    /// Zero-allocation query by key with optional time filtering.
+    /// Zero-allocation query by key using chunked processing.
     /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void QueryByKeyZeroAlloc(KeyId key, Action<ReadOnlySpan<Event>> processor, DateTime? from = null, DateTime? to = null, int chunkSize = Buffers.DefaultChunkSize)
     {
         var partition = GetPartition(key);
         var partitionBuffer = _partitions[partition];
-        var fromTicks = from?.Ticks ?? long.MinValue;
-        var toTicks = to?.Ticks ?? long.MaxValue;
-        
-        Buffers.WithRentedBuffer<Event>(chunkSize, buffer =>
+
+        if (from.HasValue && to.HasValue)
         {
-            var count = 0;
-            
-            foreach (var evt in partitionBuffer.EnumerateSnapshot())
+            partitionBuffer.SnapshotByKeyAndTimeZeroAlloc(key, from.Value.Ticks, to.Value.Ticks, processor, chunkSize);
+        }
+        else if (from.HasValue)
+        {
+            partitionBuffer.SnapshotFilteredZeroAlloc(e => e.Key.Equals(key) && e.TimestampTicks >= from.Value.Ticks, processor, chunkSize);
+        }
+        else if (to.HasValue)
+        {
+            partitionBuffer.SnapshotFilteredZeroAlloc(e => e.Key.Equals(key) && e.TimestampTicks <= to.Value.Ticks, processor, chunkSize);
+        }
+        else
+        {
+            partitionBuffer.SnapshotByKeyZeroAlloc(key, processor, chunkSize);
+        }
+    }
+
+    /// <summary>
+    /// Zero-allocation query across all partitions using chunked processing.
+    /// </summary>
+    public void QueryZeroAlloc(Action<ReadOnlySpan<Event>> processor, DateTime? from = null, DateTime? to = null, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        if (from.HasValue && to.HasValue)
+        {
+            var fromTicks = from.Value.Ticks;
+            var toTicks = to.Value.Ticks;
+            foreach (var partition in _partitions)
             {
-                if (evt.Key.Equals(key) && evt.TimestampTicks >= fromTicks && evt.TimestampTicks <= toTicks)
+                partition.SnapshotTimeRangeZeroAlloc(fromTicks, toTicks, processor, chunkSize);
+            }
+        }
+        else if (from.HasValue)
+        {
+            var fromTicks = from.Value.Ticks;
+            foreach (var partition in _partitions)
+            {
+                partition.SnapshotFilteredZeroAlloc(e => e.TimestampTicks >= fromTicks, processor, chunkSize);
+            }
+        }
+        else if (to.HasValue)
+        {
+            var toTicks = to.Value.Ticks;
+            foreach (var partition in _partitions)
+            {
+                partition.SnapshotFilteredZeroAlloc(e => e.TimestampTicks <= toTicks, processor, chunkSize);
+            }
+        }
+        else
+        {
+            foreach (var partition in _partitions)
+            {
+                partition.SnapshotZeroAlloc(processor, chunkSize);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Zero-allocation aggregation by key using pooled dictionaries and buffers.
+    /// </summary>
+    public void AggregateByKeyZeroAlloc(Action<ReadOnlySpan<KeyValuePair<KeyId, double>>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        // Use a Dictionary for accumulation (this still allocates, but only once per call)
+        var results = new Dictionary<KeyId, double>();
+        
+        // Process each partition and accumulate results
+        foreach (var partition in _partitions)
+        {
+            partition.SnapshotZeroAlloc(events =>
+            {
+                foreach (var e in events)
                 {
-                    buffer[count++] = evt;
+                    if (results.TryGetValue(e.Key, out var existingValue))
+                    {
+                        results[e.Key] = existingValue + e.Value;
+                    }
+                    else
+                    {
+                        results[e.Key] = e.Value;
+                    }
+                }
+            }, chunkSize);
+        }
+
+        // Output results in chunks using pooled buffer
+        if (results.Count > 0)
+        {
+            Buffers.WithRentedBuffer<KeyValuePair<KeyId, double>>(chunkSize, buffer =>
+            {
+                var count = 0;
+                foreach (var kvp in results)
+                {
+                    buffer[count++] = kvp;
                     
-                    if (count >= chunkSize)
+                    if (count >= buffer.Length)
                     {
                         processor(buffer.AsSpan(0, count));
                         count = 0;
                     }
                 }
-            }
-            
-            // Process remaining events
-            if (count > 0)
+                
+                // Process remaining items
+                if (count > 0)
+                {
+                    processor(buffer.AsSpan(0, count));
+                }
+            }, ArrayPool<KeyValuePair<KeyId, double>>.Shared);
+        }
+    }
+
+    /// <summary>
+    /// Zero-allocation time-filtered aggregation by key.
+    /// </summary>
+    public void AggregateByKeyZeroAlloc(DateTime from, DateTime to, Action<ReadOnlySpan<KeyValuePair<KeyId, double>>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        var results = new Dictionary<KeyId, double>();
+        var fromTicks = from.Ticks;
+        var toTicks = to.Ticks;
+        
+        foreach (var partition in _partitions)
+        {
+            partition.SnapshotTimeRangeZeroAlloc(fromTicks, toTicks, events =>
             {
-                processor(buffer.AsSpan(0, count));
-            }
-        }, Buffers.EventPool);
+                foreach (var e in events)
+                {
+                    if (results.TryGetValue(e.Key, out var existingValue))
+                    {
+                        results[e.Key] = existingValue + e.Value;
+                    }
+                    else
+                    {
+                        results[e.Key] = e.Value;
+                    }
+                }
+            }, chunkSize);
+        }
+
+        // Output results in chunks
+        if (results.Count > 0)
+        {
+            Buffers.WithRentedBuffer<KeyValuePair<KeyId, double>>(chunkSize, buffer =>
+            {
+                var count = 0;
+                foreach (var kvp in results)
+                {
+                    buffer[count++] = kvp;
+                    
+                    if (count >= buffer.Length)
+                    {
+                        processor(buffer.AsSpan(0, count));
+                        count = 0;
+                    }
+                }
+                
+                if (count > 0)
+                {
+                    processor(buffer.AsSpan(0, count));
+                }
+            }, ArrayPool<KeyValuePair<KeyId, double>>.Shared);
+        }
     }
 }

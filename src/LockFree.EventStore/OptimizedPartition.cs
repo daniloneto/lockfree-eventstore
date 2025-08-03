@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -376,5 +377,184 @@ public sealed class OptimizedPartition
     public void Clear()
     {
         Volatile.Write(ref _head, Volatile.Read(ref _tail));
+    }
+      /// <summary>
+    /// For SoA layout, provides direct access to keys with zero allocation using pooled buffers for wrap-around case.
+    /// </summary>
+    public void GetKeysZeroAlloc(Action<ReadOnlySpan<KeyId>> processor)
+    {
+        if (_layout != StorageLayout.SoA)
+            throw new InvalidOperationException("Direct key access is only available for SoA layout");
+        
+        var head = Volatile.Read(ref _head);
+        var tail = Volatile.Read(ref _tail);
+        
+        int count = (int)Math.Min(_capacity, tail - head);
+        if (count <= 0) return;
+        
+        var headIndex = (int)(head % _capacity);
+        
+        if (headIndex + count <= _capacity)
+        {
+            // No wrap-around - direct access
+            processor(new ReadOnlySpan<KeyId>(_keys!, headIndex, count));
+        }
+        else
+        {
+            // Wrap-around - use pooled buffer
+            Buffers.WithRentedBuffer<KeyId>(count, buffer =>
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    buffer[i] = _keys![(headIndex + i) % _capacity];
+                }
+                processor(buffer.AsSpan(0, count));
+            }, ArrayPool<KeyId>.Shared);
+        }
+    }
+
+    /// <summary>
+    /// For SoA layout, provides direct access to values with zero allocation using pooled buffers for wrap-around case.
+    /// </summary>
+    public void GetValuesZeroAlloc(Action<ReadOnlySpan<double>> processor)
+    {
+        if (_layout != StorageLayout.SoA)
+            throw new InvalidOperationException("Direct value access is only available for SoA layout");
+        
+        var head = Volatile.Read(ref _head);
+        var tail = Volatile.Read(ref _tail);
+        
+        int count = (int)Math.Min(_capacity, tail - head);
+        if (count <= 0) return;
+        
+        var headIndex = (int)(head % _capacity);
+        
+        if (headIndex + count <= _capacity)
+        {
+            // No wrap-around - direct access
+            processor(new ReadOnlySpan<double>(_values!, headIndex, count));
+        }
+        else
+        {
+            // Wrap-around - use pooled buffer
+            Buffers.WithRentedBuffer<double>(count, buffer =>
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    buffer[i] = _values![(headIndex + i) % _capacity];
+                }
+                processor(buffer.AsSpan(0, count));
+            }, Buffers.DoublePool);
+        }
+    }
+
+    /// <summary>
+    /// For SoA layout, provides direct access to timestamps with zero allocation using pooled buffers for wrap-around case.
+    /// </summary>
+    public void GetTimestampsZeroAlloc(Action<ReadOnlySpan<long>> processor)
+    {
+        if (_layout != StorageLayout.SoA)
+            throw new InvalidOperationException("Direct timestamp access is only available for SoA layout");
+        
+        var head = Volatile.Read(ref _head);
+        var tail = Volatile.Read(ref _tail);
+        
+        int count = (int)Math.Min(_capacity, tail - head);
+        if (count <= 0) return;
+        
+        var headIndex = (int)(head % _capacity);
+        
+        if (headIndex + count <= _capacity)
+        {
+            // No wrap-around - direct access
+            processor(new ReadOnlySpan<long>(_timestamps!, headIndex, count));
+        }
+        else
+        {
+            // Wrap-around - use pooled buffer
+            Buffers.WithRentedBuffer<long>(count, buffer =>
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    buffer[i] = _timestamps![(headIndex + i) % _capacity];
+                }
+                processor(buffer.AsSpan(0, count));
+            }, Buffers.LongPool);
+        }
+    }
+
+    /// <summary>
+    /// Zero-allocation view creation for SoA layout using pooled buffers.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void GetViewZeroAlloc(Action<PartitionView<Event>> processor)
+    {
+        var head = Volatile.Read(ref _head);
+        var tail = Volatile.Read(ref _tail);
+        
+        int count = (int)Math.Min(_capacity, tail - head);
+        if (count <= 0) 
+        {
+            processor(new PartitionView<Event>(
+                ReadOnlyMemory<Event>.Empty, 
+                ReadOnlyMemory<Event>.Empty, 
+                0, 
+                0, 
+                0));
+            return;
+        }
+          // If using SoA layout, use pooled buffer for temporary Event array
+        if (_layout == StorageLayout.SoA)
+        {
+            Buffers.WithRentedBuffer<Event>(count, tempEvents =>
+            {
+                var headPos = (int)(head % _capacity);
+                
+                for (int i = 0; i < count; i++)
+                {
+                    var index = (headPos + i) % _capacity;
+                    tempEvents[i] = new Event(_keys![index], _values![index], _timestamps![index]);
+                }
+                
+                processor(new PartitionView<Event>(
+                    new ReadOnlyMemory<Event>(tempEvents, 0, count),
+                    ReadOnlyMemory<Event>.Empty,
+                    count,
+                    tempEvents[0].TimestampTicks,
+                    tempEvents[count - 1].TimestampTicks));
+            }, Buffers.EventPool);
+        }
+        else
+        {
+            // For AoS layout, we can use the existing buffer directly
+            var headIndex = (int)(head % _capacity);
+            var tailIndex = (int)(tail % _capacity);
+            
+            if (tailIndex > headIndex || (tailIndex == headIndex && count == _capacity))
+            {
+                // No wrap-around case
+                var segment = new ReadOnlyMemory<Event>(_events!, headIndex, count);
+                
+                processor(new PartitionView<Event>(
+                    segment, 
+                    ReadOnlyMemory<Event>.Empty, 
+                    count,
+                    _events![headIndex].TimestampTicks,
+                    _events![(headIndex + count - 1) % _capacity].TimestampTicks));
+            }
+            else
+            {
+                // Wrap-around case
+                var segment1 = new ReadOnlyMemory<Event>(_events!, headIndex, _capacity - headIndex);
+                var segment2 = new ReadOnlyMemory<Event>(_events!, 0, tailIndex);
+                
+                processor(new PartitionView<Event>(
+                    segment1, 
+                    segment2, 
+                    count,
+                    _events![headIndex].TimestampTicks,
+                    _events![(tailIndex - 1 + _capacity) % _capacity].TimestampTicks));
+            }
+        }
     }
 }
