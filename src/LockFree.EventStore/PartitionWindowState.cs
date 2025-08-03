@@ -70,6 +70,12 @@ internal struct SumAggregateState<TResult>
 internal struct WindowRemoveState
 {
     public long RemovedCount;
+    
+    // Constructor to suppress warning about never assigned field
+    public WindowRemoveState(long removedCount = 0)
+    {
+        RemovedCount = removedCount;
+    }
 }
 
 /// <summary>
