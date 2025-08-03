@@ -900,4 +900,9 @@ public sealed class EventStore<TEvent>
         
         return written;
     }
+
+    /// <summary>
+    /// The timestamp selector used by this store, if configured.
+    /// </summary>
+    public IEventTimestampSelector<TEvent>? TimestampSelector => _ts;
 }
