@@ -15,6 +15,7 @@ public sealed class EventStore<TEvent>
     private readonly IEventTimestampSelector<TEvent>? _ts;
     private readonly EventStoreOptions<TEvent> _options;
     private readonly EventStoreStatistics _statistics;
+    private readonly KeyMap _keyMap; // Hot path optimization
     
     // Window state per partition for incremental aggregation
     private readonly PartitionWindowState[] _windowStates;
@@ -48,6 +49,7 @@ public sealed class EventStore<TEvent>
             throw new ArgumentOutOfRangeException(nameof(_options.Partitions));
         
         _statistics = new EventStoreStatistics();
+        _keyMap = new KeyMap();
         _partitions = new LockFreeRingBuffer<TEvent>[_options.Partitions];
         
         var capacityPerPartition = _options.Capacity.HasValue 
@@ -108,6 +110,21 @@ public sealed class EventStore<TEvent>
     /// </summary>
     public EventStoreStatistics Statistics => _statistics;
 
+    /// <summary>
+    /// Gets the timestamp selector used by this store.
+    /// </summary>
+    public IEventTimestampSelector<TEvent>? TimestampSelector => _ts;
+
+    /// <summary>
+    /// Gets the number of registered keys in the KeyMap.
+    /// </summary>
+    public int RegisteredKeysCount => _keyMap.Count;
+
+    /// <summary>
+    /// Gets all registered key mappings (for debugging/monitoring).
+    /// </summary>
+    public IReadOnlyDictionary<string, KeyId> GetKeyMappings() => _keyMap.GetAllMappings();
+
     private void OnEventDiscardedInternal(TEvent evt)
     {
         _statistics.RecordDiscard();
@@ -165,7 +182,84 @@ public sealed class EventStore<TEvent>
         return result;
     }
 
+    // ========== KEY ID HOT PATH METHODS ==========
+
     /// <summary>
+    /// Gets or creates a KeyId for the given string key.
+    /// This is the bridge method between string keys and the hot path.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public KeyId GetOrCreateKeyId(string key) => _keyMap.GetOrAdd(key);
+
+    /// <summary>
+    /// Appends an event using a string key (converts to KeyId internally).
+    /// This maintains the existing API while benefiting from KeyId optimization.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryAppend(string key, TEvent value)
+    {
+        var keyId = _keyMap.GetOrAdd(key);
+        return TryAppend(keyId, value);
+    }
+
+    /// <summary>
+    /// Appends an event using a string key with timestamp (converts to KeyId internally).
+    /// This maintains the existing API while benefiting from KeyId optimization.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryAppend(string key, TEvent value, long timestamp)
+    {
+        var keyId = _keyMap.GetOrAdd(key);
+        return TryAppend(keyId, value, timestamp);
+    }
+
+    /// <summary>
+    /// HOT PATH: Appends an event using KeyId directly (no string operations).
+    /// This is the fastest path for repeated operations with the same keys.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryAppend(KeyId keyId, TEvent value)
+    {
+        var partition = Partitioners.ForKeyIdSimple(keyId, _partitions.Length);
+        return TryAppend(value, partition);
+    }
+
+    /// <summary>
+    /// HOT PATH: Appends an event using KeyId with timestamp (no string operations).
+    /// This is the fastest path for repeated operations with the same keys.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryAppend(KeyId keyId, TEvent value, long timestamp)
+    {
+        var partition = Partitioners.ForKeyIdSimple(keyId, _partitions.Length);
+        return TryAppend(value, partition);
+    }
+
+    /// <summary>
+    /// HOT PATH: Batch append using KeyId array (no string operations).
+    /// All events use the same KeyId for maximum performance.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int TryAppendBatch(KeyId keyId, ReadOnlySpan<TEvent> batch)
+    {
+        var partition = Partitioners.ForKeyIdSimple(keyId, _partitions.Length);
+        return TryAppendBatch(batch, partition);
+    }
+
+    /// <summary>
+    /// Batch append with KeyId-Event pairs (mixed keys but still hot path).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int TryAppendBatch(ReadOnlySpan<(KeyId KeyId, TEvent Event)> batch)
+    {
+        int written = 0;
+        foreach (var (keyId, evt) in batch)
+        {
+            if (TryAppend(keyId, evt))
+                written++;
+        }
+        return written;
+    }    /// <summary>
     /// Clears all events from the store.
     /// </summary>
     public void Clear()
@@ -175,6 +269,15 @@ public sealed class EventStore<TEvent>
             partition.Clear();
         }
         _statistics.Reset();
+    }
+
+    /// <summary>
+    /// Clears all events and resets KeyMap.
+    /// </summary>
+    public void ClearAll()
+    {
+        Clear();
+        _keyMap.Clear();
     }
 
     /// <summary>
@@ -900,9 +1003,4 @@ public sealed class EventStore<TEvent>
         
         return written;
     }
-
-    /// <summary>
-    /// The timestamp selector used by this store, if configured.
-    /// </summary>
-    public IEventTimestampSelector<TEvent>? TimestampSelector => _ts;
 }
