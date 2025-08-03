@@ -1,4 +1,5 @@
 using System.Threading;
+using System.Runtime.CompilerServices;
 
 namespace LockFree.EventStore;
 
@@ -132,4 +133,93 @@ public sealed class LockFreeRingBuffer<T>
         for (int i = 0; i < len; i++)
             yield return tmp[i];
     }
+
+    /// <summary>
+    /// Internal method for window aggregation. Enumerates items within a timestamp range
+    /// without allocating collections, using a callback for each valid item.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void EnumerateWindow<TState>(
+        long fromTicks, 
+        long toTicks, 
+        IEventTimestampSelector<T>? timestampSelector,
+        ref TState state,
+        WindowItemCallback<T, TState> callback)
+    {
+        var head = Volatile.Read(ref _head);
+        var tail = Volatile.Read(ref _tail);
+        var count = Math.Min(tail - head, _capacity);
+        
+        for (long i = 0; i < count; i++)
+        {
+            var index = (head + i) % _capacity;
+            var item = _buffer[index];
+            
+            if (timestampSelector != null)
+            {
+                var timestamp = timestampSelector.GetTimestamp(item);
+                var ticks = timestamp.Ticks;
+                
+                if (ticks >= fromTicks && ticks <= toTicks)
+                {
+                    callback(ref state, item, ticks);
+                }
+            }
+            else
+            {
+                // No timestamp filtering - include all items
+                callback(ref state, item, 0);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Advances the window head to start from the first event with timestamp >= windowStartTicks.
+    /// Updates aggregate state by removing events that fall outside the window.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void AdvanceWindowTo<TState>(
+        long windowStartTicks,
+        IEventTimestampSelector<T>? timestampSelector,
+        ref TState state,
+        WindowAdvanceCallback<T, TState> removeCallback,
+        ref int windowHeadIndex)
+    {
+        if (timestampSelector == null) return;
+        
+        var head = Volatile.Read(ref _head);
+        var tail = Volatile.Read(ref _tail);
+        var count = Math.Min(tail - head, _capacity);
+        
+        // Find new window head position
+        var newWindowHead = windowHeadIndex;
+        
+        for (long i = windowHeadIndex; i < count; i++)
+        {
+            var index = (head + i) % _capacity;
+            var item = _buffer[index];
+            var timestamp = timestampSelector.GetTimestamp(item);
+            
+            if (timestamp.Ticks >= windowStartTicks)
+            {
+                break; // Found the new window start
+            }
+            
+            // Remove this item from the window state
+            removeCallback(ref state, item, timestamp.Ticks);
+            newWindowHead = (int)(i + 1);
+        }
+        
+        windowHeadIndex = newWindowHead;
+    }
 }
+
+/// <summary>
+/// Callback delegate for processing items during window enumeration.
+/// </summary>
+internal delegate void WindowItemCallback<in T, TState>(ref TState state, T item, long ticks);
+
+/// <summary>
+/// Callback delegate for removing items during window advancement.
+/// </summary>
+internal delegate void WindowAdvanceCallback<in T, TState>(ref TState state, T item, long ticks);
