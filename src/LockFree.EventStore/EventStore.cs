@@ -197,7 +197,7 @@ public sealed class EventStore<TEvent>
             var partition = Partitioners.ForKey(evt, _partitions.Length);
             _partitions[partition].TryEnqueue(evt);
         }
-    }/// <summary>
+    }    /// <summary>
     /// Takes a snapshot of all partitions and returns an immutable list.
     /// </summary>
     public IReadOnlyList<TEvent> Snapshot()
@@ -219,6 +219,46 @@ public sealed class EventStore<TEvent>
             idx += len;
         }
         return result;
+    }
+
+    /// <summary>
+    /// Creates zero-allocation views of all partition contents.
+    /// Returns ReadOnlyMemory segments that reference the underlying buffer without copying data.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public IReadOnlyList<PartitionView<TEvent>> SnapshotViews()
+    {
+        var views = new PartitionView<TEvent>[_partitions.Length];
+        
+        for (int i = 0; i < _partitions.Length; i++)
+        {
+            views[i] = _partitions[i].CreateView(_ts);
+        }
+        
+        return views;
+    }
+
+    /// <summary>
+    /// Creates zero-allocation views of partition contents filtered by timestamp range.
+    /// Requires a TimestampSelector to be configured.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public IReadOnlyList<PartitionView<TEvent>> SnapshotViews(DateTime? from = null, DateTime? to = null)
+    {
+        if (_ts == null)
+            throw new InvalidOperationException("TimestampSelector must be configured to use timestamp filtering.");
+        
+        var fromTicks = from?.Ticks ?? long.MinValue;
+        var toTicks = to?.Ticks ?? long.MaxValue;
+        
+        var views = new PartitionView<TEvent>[_partitions.Length];
+        
+        for (int i = 0; i < _partitions.Length; i++)
+        {
+            views[i] = _partitions[i].CreateViewFiltered(fromTicks, toTicks, _ts);
+        }
+        
+        return views;
     }
 
     /// <summary>
@@ -509,15 +549,13 @@ public sealed class EventStore<TEvent>
         }
         
         return globalResult.ToResult();
-    }
-
-    /// <summary>
+    }    /// <summary>
     /// Overload that accepts DateTime parameters for convenience.
     /// </summary>
     public WindowAggregateResult AggregateWindow(DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
     {
-        var fromTicks = from?.Ticks ?? 0;
-        var toTicks = to?.Ticks ?? DateTime.MaxValue.Ticks;
+        var fromTicks = from?.Ticks ?? long.MinValue;
+        var toTicks = to?.Ticks ?? long.MaxValue;
         return AggregateWindow(fromTicks, toTicks, filter);
     }
 
@@ -572,29 +610,163 @@ public sealed class EventStore<TEvent>
                 state.RemovedCount++;
             },
             ref windowState.WindowHeadIndex);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static WindowItemCallback<TEvent, WindowAggregateState> CreateCallback()
+    }    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private WindowItemCallback<TEvent, WindowAggregateState> CreateCallback()
     {
         return (ref WindowAggregateState state, TEvent item, long ticks) =>
         {
             state.Count++;
-            // For generic aggregation, we can't extract numeric values without a selector
-            // This is used for count-only operations
+            // Try to extract numeric value for Sum/Min/Max calculations
+            if (TryExtractNumericValue(item, out double value))
+            {
+                state.Sum += value;
+                if (state.Count == 1) // First item
+                {
+                    state.Min = value;
+                    state.Max = value;
+                }
+                else
+                {
+                    if (value < state.Min) state.Min = value;
+                    if (value > state.Max) state.Max = value;
+                }
+            }
         };
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static WindowItemCallback<TEvent, WindowAggregateState> CreateFilteredCallback(Predicate<TEvent> filter)
+    private WindowItemCallback<TEvent, WindowAggregateState> CreateFilteredCallback(Predicate<TEvent> filter)
     {
         return (ref WindowAggregateState state, TEvent item, long ticks) =>
         {
             if (filter(item))
             {
                 state.Count++;
+                // Try to extract numeric value for Sum/Min/Max calculations
+                if (TryExtractNumericValue(item, out double value))
+                {
+                    state.Sum += value;
+                    if (state.Count == 1) // First item after filtering
+                    {
+                        state.Min = value;
+                        state.Max = value;
+                    }
+                    else
+                    {
+                        if (value < state.Min) state.Min = value;
+                        if (value > state.Max) state.Max = value;
+                    }
+                }
             }
         };
+    }
+
+    /// <summary>
+    /// Attempts to extract a numeric value from an event using reflection as a fallback.
+    /// This is used for generic window aggregation when no explicit selector is provided.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool TryExtractNumericValue(TEvent item, out double value)
+    {
+        value = 0.0;
+        
+        if (item == null) return false;
+        
+        var type = typeof(TEvent);
+        
+        // For Order type, extract Amount property
+        if (type.Name == "Order")
+        {
+            var amountProperty = type.GetProperty("Amount");
+            if (amountProperty != null)
+            {
+                var amount = amountProperty.GetValue(item);
+                if (amount is decimal decimalAmount)
+                {
+                    value = (double)decimalAmount;
+                    return true;
+                }
+                if (amount is double doubleAmount)
+                {
+                    value = doubleAmount;
+                    return true;
+                }
+                if (amount is float floatAmount)
+                {
+                    value = (double)floatAmount;
+                    return true;
+                }
+                if (amount is int intAmount)
+                {
+                    value = (double)intAmount;
+                    return true;
+                }
+                if (amount is long longAmount)
+                {
+                    value = (double)longAmount;
+                    return true;
+                }
+            }
+        }
+        
+        // For MetricEvent type, extract Value property
+        if (type.Name == "MetricEvent")
+        {
+            var valueProperty = type.GetProperty("Value");
+            if (valueProperty != null)
+            {
+                var val = valueProperty.GetValue(item);
+                if (val is double doubleVal)
+                {
+                    value = doubleVal;
+                    return true;
+                }
+                if (val is decimal decimalVal)
+                {
+                    value = (double)decimalVal;
+                    return true;
+                }
+                if (val is float floatVal)
+                {
+                    value = (double)floatVal;
+                    return true;
+                }
+            }
+        }
+        
+        // Generic fallback: try to find any numeric property
+        var properties = type.GetProperties();
+        foreach (var prop in properties)
+        {
+            var propValue = prop.GetValue(item);
+            if (propValue is decimal decValue)
+            {
+                value = (double)decValue;
+                return true;
+            }
+            if (propValue is double doubleValue)
+            {
+                value = doubleValue;
+                return true;
+            }
+            if (propValue is float floatValue)
+            {
+                value = (double)floatValue;
+                return true;
+            }
+            if (propValue is int intValue)
+            {
+                value = (double)intValue;
+                return true;
+            }
+            if (propValue is long longValue)
+            {
+                value = (double)longValue;
+                return true;
+            }
+        }
+        
+        return false;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

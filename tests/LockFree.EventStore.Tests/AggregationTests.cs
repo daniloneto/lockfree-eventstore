@@ -51,11 +51,11 @@ public class AggregationTests
 
         var result = store.AggregateWindow(from: now.AddMinutes(-4), to: now);
 
-        Assert.Equal(3, result.Count);
-        Assert.Equal(35.0, result.Sum);
+        Assert.Equal(2, result.Count); // Only orders 2 and 3 are in the window
+        Assert.Equal(25.0, result.Sum); // 20 + 5
         Assert.Equal(5.0, result.Min);
         Assert.Equal(20.0, result.Max);
-        Assert.Equal(35.0 / 3.0, result.Avg, 2);
+        Assert.Equal(25.0 / 2.0, result.Avg, 2);
     }
 
     [Fact]

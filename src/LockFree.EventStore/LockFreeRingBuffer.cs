@@ -13,6 +13,8 @@ public sealed class LockFreeRingBuffer<T>
     private long _head;
     private long _tail;
     private readonly Action<T>? _onItemDiscarded;
+      // Epoch-based consistency for snapshot operations
+    private int _epoch;
 
     /// <summary>
     /// Initializes a new instance with the specified capacity.
@@ -24,6 +26,7 @@ public sealed class LockFreeRingBuffer<T>
         _capacity = capacity;
         _buffer = new T[capacity];
         _onItemDiscarded = onItemDiscarded;
+        _epoch = 0;
     }    /// <summary>
     /// Total capacity.
     /// </summary>
@@ -42,16 +45,22 @@ public sealed class LockFreeRingBuffer<T>
     /// <summary>
     /// Whether the buffer is at full capacity (approximate).
     /// </summary>
-    public bool IsFull => CountApprox >= _capacity;
-
-    /// <summary>
+    public bool IsFull => CountApprox >= _capacity;    /// <summary>
     /// Enqueues a single item, overwriting the oldest if necessary.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryEnqueue(T item)
     {
         var tail = Interlocked.Increment(ref _tail);
         _buffer[(tail - 1) % _capacity] = item;
         AdvanceHeadIfNeeded(tail);
+        
+        // Update epoch sparingly - only when tail advances significantly
+        if ((tail & 0xFF) == 0) // Every 256 items
+        {
+            Interlocked.Increment(ref _epoch);
+        }
+        
         return true;
     }
 
@@ -121,9 +130,7 @@ public sealed class LockFreeRingBuffer<T>
             destination[i] = _buffer[(head + i) % _capacity];
         }
         return length;
-    }
-
-    /// <summary>
+    }    /// <summary>
     /// Convenience method that allocates an array and returns an enumerable.
     /// </summary>
     public IEnumerable<T> EnumerateSnapshot()
@@ -132,6 +139,180 @@ public sealed class LockFreeRingBuffer<T>
         var len = Snapshot(tmp);
         for (int i = 0; i < len; i++)
             yield return tmp[i];
+    }
+
+    /// <summary>
+    /// Creates a view of the buffer contents without copying data.
+    /// Uses epoch-based consistency to ensure a stable snapshot.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public PartitionView<T> CreateView(IEventTimestampSelector<T>? timestampSelector = null)
+    {
+        const int maxRetries = 10;
+        
+        for (int retry = 0; retry < maxRetries; retry++)
+        {
+            var startEpoch = Volatile.Read(ref _epoch);
+            var head = Volatile.Read(ref _head);
+            var tail = Volatile.Read(ref _tail);
+            var endEpoch = Volatile.Read(ref _epoch);
+            
+            // Check if epoch changed during read - if so, retry
+            if (startEpoch != endEpoch)
+                continue;
+            
+            return CreateViewFromRange(head, tail, timestampSelector);
+        }
+        
+        // Fallback: take current snapshot even if not perfectly consistent
+        var currentHead = Volatile.Read(ref _head);
+        var currentTail = Volatile.Read(ref _tail);
+        return CreateViewFromRange(currentHead, currentTail, timestampSelector);
+    }
+
+    /// <summary>
+    /// Creates a view with explicit timestamp filtering.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public PartitionView<T> CreateViewFiltered(
+        long fromTicks, 
+        long toTicks, 
+        IEventTimestampSelector<T> timestampSelector)
+    {
+        if (timestampSelector == null)
+            throw new ArgumentNullException(nameof(timestampSelector));
+            
+        const int maxRetries = 10;
+        
+        for (int retry = 0; retry < maxRetries; retry++)
+        {
+            var startEpoch = Volatile.Read(ref _epoch);
+            var head = Volatile.Read(ref _head);
+            var tail = Volatile.Read(ref _tail);
+            var endEpoch = Volatile.Read(ref _epoch);
+            
+            if (startEpoch != endEpoch)
+                continue;
+            
+            return CreateFilteredViewFromRange(head, tail, fromTicks, toTicks, timestampSelector);
+        }
+        
+        // Fallback
+        var currentHead = Volatile.Read(ref _head);
+        var currentTail = Volatile.Read(ref _tail);
+        return CreateFilteredViewFromRange(currentHead, currentTail, fromTicks, toTicks, timestampSelector);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private PartitionView<T> CreateViewFromRange(long head, long tail, IEventTimestampSelector<T>? timestampSelector)
+    {
+        var count = (int)Math.Min(Math.Min(tail - head, _capacity), int.MaxValue);
+        if (count <= 0)
+        {
+            return new PartitionView<T>(
+                ReadOnlyMemory<T>.Empty,
+                ReadOnlyMemory<T>.Empty,
+                0, 0, 0);
+        }
+        
+        var startIndex = (int)(head % _capacity);
+        var endIndex = (int)((head + count - 1) % _capacity);
+        
+        long fromTicks = 0, toTicks = 0;
+        if (timestampSelector != null && count > 0)
+        {
+            var firstEvent = _buffer[startIndex];
+            var lastEvent = _buffer[endIndex];
+            fromTicks = timestampSelector.GetTimestamp(firstEvent).Ticks;
+            toTicks = timestampSelector.GetTimestamp(lastEvent).Ticks;
+        }
+        
+        // Check if we need to wrap around
+        if (startIndex + count <= _capacity)
+        {
+            // Single segment case
+            var segment = _buffer.AsMemory(startIndex, count);
+            return new PartitionView<T>(segment, ReadOnlyMemory<T>.Empty, count, fromTicks, toTicks);
+        }
+        else
+        {
+            // Wrap-around case: two segments
+            var firstSegmentLength = _capacity - startIndex;
+            var secondSegmentLength = count - firstSegmentLength;
+            
+            var segment1 = _buffer.AsMemory(startIndex, firstSegmentLength);
+            var segment2 = _buffer.AsMemory(0, secondSegmentLength);
+            
+            return new PartitionView<T>(segment1, segment2, count, fromTicks, toTicks);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private PartitionView<T> CreateFilteredViewFromRange(
+        long head, 
+        long tail, 
+        long fromTicks, 
+        long toTicks, 
+        IEventTimestampSelector<T> timestampSelector)
+    {
+        var totalCount = (int)Math.Min(Math.Min(tail - head, _capacity), int.MaxValue);
+        if (totalCount <= 0)
+        {
+            return new PartitionView<T>(
+                ReadOnlyMemory<T>.Empty,
+                ReadOnlyMemory<T>.Empty,
+                0, fromTicks, toTicks);
+        }
+        
+        // Find the range of valid events
+        int validStart = -1, validEnd = -1;
+        int validCount = 0;
+        
+        for (int i = 0; i < totalCount; i++)
+        {
+            var index = (int)((head + i) % _capacity);
+            var item = _buffer[index];
+            var itemTicks = timestampSelector.GetTimestamp(item).Ticks;
+            
+            if (itemTicks >= fromTicks && itemTicks <= toTicks)
+            {
+                if (validStart == -1)
+                    validStart = i;
+                validEnd = i;
+                validCount++;
+            }
+        }
+        
+        if (validCount == 0)
+        {
+            return new PartitionView<T>(
+                ReadOnlyMemory<T>.Empty,
+                ReadOnlyMemory<T>.Empty,
+                0, fromTicks, toTicks);
+        }
+        
+        // Create view for the valid range
+        var actualStartIndex = (int)((head + validStart) % _capacity);
+        var actualEndIndex = (int)((head + validEnd) % _capacity);
+        
+        if (actualStartIndex <= actualEndIndex)
+        {
+            // Single segment
+            var length = actualEndIndex - actualStartIndex + 1;
+            var segment = _buffer.AsMemory(actualStartIndex, length);
+            return new PartitionView<T>(segment, ReadOnlyMemory<T>.Empty, validCount, fromTicks, toTicks);
+        }
+        else
+        {
+            // Wrap-around case
+            var firstSegmentLength = _capacity - actualStartIndex;
+            var secondSegmentLength = actualEndIndex + 1;
+            
+            var segment1 = _buffer.AsMemory(actualStartIndex, firstSegmentLength);
+            var segment2 = _buffer.AsMemory(0, secondSegmentLength);
+            
+            return new PartitionView<T>(segment1, segment2, validCount, fromTicks, toTicks);
+        }
     }
 
     /// <summary>
@@ -153,13 +334,12 @@ public sealed class LockFreeRingBuffer<T>
         for (long i = 0; i < count; i++)
         {
             var index = (head + i) % _capacity;
-            var item = _buffer[index];
-            
-            if (timestampSelector != null)
+            var item = _buffer[index];            if (timestampSelector != null)
             {
                 var timestamp = timestampSelector.GetTimestamp(item);
                 var ticks = timestamp.Ticks;
                 
+                // Use same logic as WithinWindow: from inclusive, to inclusive  
                 if (ticks >= fromTicks && ticks <= toTicks)
                 {
                     callback(ref state, item, ticks);
