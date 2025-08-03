@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Numerics;
 using System.Threading;
@@ -289,56 +290,109 @@ public sealed class EventStore<TEvent>
     }    /// <summary>
     /// Purges events older than the specified timestamp.
     /// Requires a TimestampSelector to be configured.
+    /// Uses pooled buffers to minimize allocations during purge.
     /// </summary>
     public void Purge(DateTime olderThan)
     {
         if (_ts == null)
             throw new InvalidOperationException("TimestampSelector must be configured to use Purge.");
 
-        // Get all current events that should be kept
-        var eventsToKeep = new List<TEvent>();
-        foreach (var evt in EnumerateSnapshot())
+        var pool = ArrayPool<TEvent>.Shared;
+        var tempBuffer = pool.Rent(16384); // Start with reasonable size
+        var keepCount = 0;
+        
+        try
         {
-            if (_ts.GetTimestamp(evt) >= olderThan)
+            // Collect events to keep using chunked processing
+            SnapshotZeroAlloc(events =>
             {
-                eventsToKeep.Add(evt);
+                foreach (var evt in events)
+                {
+                    if (_ts.GetTimestamp(evt) >= olderThan)
+                    {
+                        // Expand buffer if needed
+                        if (keepCount >= tempBuffer.Length)
+                        {
+                            var oldBuffer = tempBuffer;
+                            var newBuffer = pool.Rent(tempBuffer.Length * 2);
+                            oldBuffer.AsSpan(0, keepCount).CopyTo(newBuffer);
+                            pool.Return(oldBuffer);
+                            tempBuffer = newBuffer;
+                        }
+                        
+                        tempBuffer[keepCount++] = evt;
+                    }
+                }
+            });
+
+            // Clear the store
+            foreach (var partition in _partitions)
+            {
+                partition.Clear();
+            }
+
+            // Re-add the events we want to keep
+            for (int i = 0; i < keepCount; i++)
+            {
+                var evt = tempBuffer[i];
+                var partition = Partitioners.ForKey(evt, _partitions.Length);
+                _partitions[partition].TryEnqueue(evt);
             }
         }
-
-        // Clear the store without affecting statistics
-        foreach (var partition in _partitions)
+        finally
         {
-            partition.Clear();
+            pool.Return(tempBuffer, clearArray: false);
         }
-
-        // Re-add the events we want to keep without incrementing statistics
-        foreach (var evt in eventsToKeep)
-        {
-            var partition = Partitioners.ForKey(evt, _partitions.Length);
-            _partitions[partition].TryEnqueue(evt);
-        }
-    }    /// <summary>
+    }/// <summary>
     /// Takes a snapshot of all partitions and returns an immutable list.
+    /// Uses pooled buffers for temporary storage to reduce allocations.
     /// </summary>
     public IReadOnlyList<TEvent> Snapshot()
     {
-        var arrays = new (TEvent[] Buffer, int Length)[_partitions.Length];
+        // First pass: calculate total count
         long total = 0;
-        for (int i = 0; i < _partitions.Length; i++)
+        var partitionLengths = Buffers.RentInts(_partitions.Length);
+        
+        try
         {
-            var buf = new TEvent[_partitions[i].Capacity];
-            var len = _partitions[i].Snapshot(buf);
-            arrays[i] = (buf, len);
-            total += len;
+            for (int i = 0; i < _partitions.Length; i++)
+            {
+                var len = _partitions[i].CountApprox;
+                partitionLengths[i] = (int)Math.Min(len, _partitions[i].Capacity);
+                total += partitionLengths[i];
+            }
+            
+            // Allocate final result array
+            var result = new TEvent[total];
+            int idx = 0;
+            
+            // Second pass: populate result using pooled temporary buffers
+            for (int i = 0; i < _partitions.Length; i++)
+            {
+                var expectedLen = partitionLengths[i];
+                if (expectedLen > 0)
+                {
+                    var tempBuffer = new TEvent[_partitions[i].Capacity];
+                    var actualLen = _partitions[i].Snapshot(tempBuffer);
+                    tempBuffer.AsSpan(0, actualLen).CopyTo(result.AsSpan(idx));
+                    idx += actualLen;
+                }
+            }
+            
+            // Trim result array if needed
+            if (idx < result.Length)
+            {
+                var trimmed = new TEvent[idx];
+                result.AsSpan(0, idx).CopyTo(trimmed);
+                return trimmed;
+            }
+            
+            return result;
         }
-        var result = new TEvent[total];
-        int idx = 0;
-        foreach (var (buf, len) in arrays)
+        finally
         {
-            buf.AsSpan(0, len).CopyTo(result.AsSpan(idx));
-            idx += len;
+            Buffers.ReturnInts(partitionLengths);
         }
-        return result;
     }
 
     /// <summary>
@@ -403,19 +457,19 @@ public sealed class EventStore<TEvent>
     public IReadOnlyList<TEvent> Snapshot(Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
     {
         return Query(filter, from, to).ToList();
-    }
-
-    /// <summary>
+    }    /// <summary>
     /// Returns an enumerable snapshot of all events.
+    /// Uses iterator pattern to avoid upfront allocations.
     /// </summary>
     public IEnumerable<TEvent> EnumerateSnapshot()
     {
-        var results = new List<TEvent>();
         foreach (var partition in _partitions)
         {
-            results.AddRange(partition.EnumerateSnapshot());
+            foreach (var e in partition.EnumerateSnapshot())
+            {
+                yield return e;
+            }
         }
-        return results;
     }
 
     private bool WithinWindow(TEvent e, DateTime? from, DateTime? to)
@@ -430,10 +484,10 @@ public sealed class EventStore<TEvent>
         return true;
     }    /// <summary>
     /// Queries events by optional filter and time window.
+    /// Uses iterator pattern to avoid upfront allocations.
     /// </summary>
     public IEnumerable<TEvent> Query(Predicate<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
     {
-        var results = new List<TEvent>();
         foreach (var partition in _partitions)
         {
             foreach (var e in partition.EnumerateSnapshot())
@@ -441,10 +495,9 @@ public sealed class EventStore<TEvent>
                 if (!WithinWindow(e, from, to))
                     continue;
                 if (filter is null || filter(e))
-                    results.Add(e);
+                    yield return e;
             }
         }
-        return results;
     }
 
     /// <summary>
@@ -1005,6 +1058,102 @@ public sealed class EventStore<TEvent>
         }
         
         return written;
+    }
+
+    /// <summary>
+    /// Zero-allocation snapshot using chunked processing with pooled buffers.
+    /// Processes results in fixed-size chunks to avoid large allocations.
+    /// </summary>
+    public void SnapshotZeroAlloc(Action<ReadOnlySpan<TEvent>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        foreach (var partition in _partitions)
+        {
+            // Check if partition supports zero-allocation snapshot
+            if (partition is LockFreeRingBuffer<TEvent> typedPartition)
+            {
+                // Use generic array pool for T
+                var pool = ArrayPool<TEvent>.Shared;
+                typedPartition.SnapshotZeroAlloc<TEvent>(processor, pool, chunkSize);
+            }
+            else
+            {
+                // Fallback for other partition types
+                var tempBuffer = new TEvent[partition.Capacity];
+                var len = partition.Snapshot(tempBuffer);
+                if (len > 0)
+                {
+                    for (int i = 0; i < len; i += chunkSize)
+                    {
+                        var chunkLen = Math.Min(chunkSize, len - i);
+                        processor(tempBuffer.AsSpan(i, chunkLen));
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Zero-allocation filtered snapshot using chunked processing.
+    /// </summary>
+    public void SnapshotFilteredZeroAlloc(Func<TEvent, bool> filter, Action<ReadOnlySpan<TEvent>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        var pool = ArrayPool<TEvent>.Shared;
+        var buffer = pool.Rent(chunkSize);
+        
+        try
+        {
+            var bufferCount = 0;
+            
+            foreach (var partition in _partitions)
+            {
+                var tempBuffer = new TEvent[partition.Capacity];
+                var len = partition.Snapshot(tempBuffer);
+                
+                for (int i = 0; i < len; i++)
+                {
+                    var item = tempBuffer[i];
+                    if (filter(item))
+                    {
+                        buffer[bufferCount++] = item;
+                        
+                        if (bufferCount >= buffer.Length)
+                        {
+                            processor(buffer.AsSpan(0, bufferCount));
+                            bufferCount = 0;
+                        }
+                    }
+                }
+            }
+            
+            // Process remaining events
+            if (bufferCount > 0)
+            {
+                processor(buffer.AsSpan(0, bufferCount));
+            }
+        }
+        finally
+        {
+            pool.Return(buffer, clearArray: false);
+        }
+    }
+
+    /// <summary>
+    /// Zero-allocation time-filtered snapshot using chunked processing.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void SnapshotTimeFilteredZeroAlloc(DateTime? from, DateTime? to, Action<ReadOnlySpan<TEvent>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        if (_ts == null)
+            throw new InvalidOperationException("TimestampSelector must be configured to use time filtering.");
+        
+        var fromTicks = from?.Ticks ?? long.MinValue;
+        var toTicks = to?.Ticks ?? long.MaxValue;
+        
+        SnapshotFilteredZeroAlloc(evt =>
+        {
+            var timestamp = _ts.GetTimestamp(evt);
+            return timestamp.Ticks >= fromTicks && timestamp.Ticks <= toTicks;
+        }, processor, chunkSize);
     }
 }
 

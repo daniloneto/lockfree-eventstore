@@ -117,44 +117,73 @@ public sealed class SpecializedEventStore
     public void Add(KeyId key, double value, DateTime timestamp)
     {
         Add(new Event(key, value, timestamp.Ticks));
-    }
-
-    /// <summary>
+    }    /// <summary>
     /// Adds multiple events efficiently using batch operations grouped by partition.
+    /// Uses pooled buffers to avoid allocations in hot path.
     /// </summary>
     public void AddRange(ReadOnlySpan<Event> events)
     {
         if (events.IsEmpty) return;
 
-        // Group events by partition for better cache locality - SoA approach
-        var partitionGroups = new List<Event>[_partitions.Length];
-        for (int i = 0; i < _partitions.Length; i++)
+        // Use pooled arrays for partition grouping to avoid allocations
+        var partitionBuffers = new Event[_partitions.Length][];
+        var partitionCounts = Buffers.RentInts(_partitions.Length);
+        
+        try
         {
-            partitionGroups[i] = new List<Event>();
-        }
-
-        // Distribute events to partitions
-        foreach (var e in events)
-        {
-            var partition = GetPartition(e.Key);
-            partitionGroups[partition].Add(e);
-        }
-
-        // Add to each partition in batch for optimal cache usage
-        for (int i = 0; i < _partitions.Length; i++)
-        {
-            if (partitionGroups[i].Count > 0)
+            // Initialize partition buffers and counts
+            for (int i = 0; i < _partitions.Length; i++)
             {
-                var span = CollectionsMarshal.AsSpan(partitionGroups[i]);
-                _partitions[i].TryEnqueueBatch(span);
+                partitionBuffers[i] = Buffers.RentEvents(Math.Max(16, events.Length / _partitions.Length));
+                partitionCounts[i] = 0;
+            }
+
+            // Distribute events to partitions
+            foreach (var e in events)
+            {
+                var partition = GetPartition(e.Key);
+                var count = partitionCounts[partition];
+                
+                // Expand buffer if needed
+                if (count >= partitionBuffers[partition].Length)
+                {
+                    var oldBuffer = partitionBuffers[partition];
+                    var newBuffer = Buffers.RentEvents(count * 2);
+                    oldBuffer.AsSpan(0, count).CopyTo(newBuffer);
+                    Buffers.ReturnEvents(oldBuffer);
+                    partitionBuffers[partition] = newBuffer;
+                }
+                
+                partitionBuffers[partition][count] = e;
+                partitionCounts[partition] = count + 1;
+            }
+
+            // Add to each partition in batch for optimal cache usage
+            for (int i = 0; i < _partitions.Length; i++)
+            {
+                var count = partitionCounts[i];
+                if (count > 0)
+                {
+                    var span = partitionBuffers[i].AsSpan(0, count);
+                    _partitions[i].TryEnqueueBatch(span);
+                }
+            }
+
+            _statistics.IncrementTotalAdded(events.Length);
+        }
+        finally
+        {
+            // Return all buffers to pools
+            Buffers.ReturnInts(partitionCounts);
+            for (int i = 0; i < _partitions.Length; i++)
+            {
+                if (partitionBuffers[i] != null)
+                    Buffers.ReturnEvents(partitionBuffers[i]);
             }
         }
-
-        _statistics.IncrementTotalAdded(events.Length);
-    }
-
-    /// <summary>
+    }    /// <summary>
     /// Adds multiple events from an enumerable.
+    /// Uses chunked processing to avoid large allocations.
     /// </summary>
     public void AddRange(IEnumerable<Event> events)
     {
@@ -168,8 +197,23 @@ public sealed class SpecializedEventStore
         }
         else
         {
-            var eventList = events.ToList();
-            AddRange(CollectionsMarshal.AsSpan(eventList));
+            // Process in chunks to avoid large temporary allocations
+            Buffers.WithRentedBuffer<Event>(Buffers.DefaultChunkSize, buffer =>
+            {
+                using var enumerator = events.GetEnumerator();
+                while (enumerator.MoveNext())
+                {
+                    var count = 0;
+                    do
+                    {
+                        buffer[count++] = enumerator.Current;
+                    }
+                    while (count < buffer.Length && enumerator.MoveNext());
+                    
+                    // Process the chunk
+                    AddRange(buffer.AsSpan(0, count));
+                }
+            }, Buffers.EventPool);
         }
     }
 
@@ -367,5 +411,118 @@ public sealed class SpecializedEventStore
         }
         
         return results;
+    }
+
+    /// <summary>
+    /// Zero-allocation snapshot using chunked processing with pooled buffers.
+    /// Processes results in fixed-size chunks to avoid large allocations.
+    /// </summary>
+    public void SnapshotZeroAlloc(Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        Buffers.WithRentedBuffer<Event>(chunkSize, buffer =>
+        {
+            foreach (var partition in _partitions)
+            {
+                var partitionBuffer = Buffers.RentEvents(partition.Capacity);
+                try
+                {
+                    var count = 0;
+                    foreach (var evt in partition.EnumerateSnapshot())
+                    {
+                        partitionBuffer[count++] = evt;
+                        
+                        if (count >= chunkSize)
+                        {
+                            processor(partitionBuffer.AsSpan(0, count));
+                            count = 0;
+                        }
+                    }
+                    
+                    // Process remaining events
+                    if (count > 0)
+                    {
+                        processor(partitionBuffer.AsSpan(0, count));
+                    }
+                }
+                finally
+                {
+                    Buffers.ReturnEvents(partitionBuffer);
+                }
+            }
+        }, Buffers.EventPool);
+    }
+
+    /// <summary>
+    /// Zero-allocation query with time filtering using chunked processing.
+    /// </summary>
+    public void QueryZeroAlloc(Action<ReadOnlySpan<Event>> processor, DateTime? from = null, DateTime? to = null, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        var fromTicks = from?.Ticks ?? long.MinValue;
+        var toTicks = to?.Ticks ?? long.MaxValue;
+        
+        Buffers.WithRentedBuffer<Event>(chunkSize, buffer =>
+        {
+            var count = 0;
+            
+            foreach (var partition in _partitions)
+            {
+                foreach (var evt in partition.EnumerateSnapshot())
+                {
+                    if (evt.TimestampTicks >= fromTicks && evt.TimestampTicks <= toTicks)
+                    {
+                        buffer[count++] = evt;
+                        
+                        if (count >= chunkSize)
+                        {
+                            processor(buffer.AsSpan(0, count));
+                            count = 0;
+                        }
+                    }
+                }
+            }
+            
+            // Process remaining events
+            if (count > 0)
+            {
+                processor(buffer.AsSpan(0, count));
+            }
+        }, Buffers.EventPool);
+    }
+
+    /// <summary>
+    /// Zero-allocation query by key with optional time filtering.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void QueryByKeyZeroAlloc(KeyId key, Action<ReadOnlySpan<Event>> processor, DateTime? from = null, DateTime? to = null, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        var partition = GetPartition(key);
+        var partitionBuffer = _partitions[partition];
+        var fromTicks = from?.Ticks ?? long.MinValue;
+        var toTicks = to?.Ticks ?? long.MaxValue;
+        
+        Buffers.WithRentedBuffer<Event>(chunkSize, buffer =>
+        {
+            var count = 0;
+            
+            foreach (var evt in partitionBuffer.EnumerateSnapshot())
+            {
+                if (evt.Key.Equals(key) && evt.TimestampTicks >= fromTicks && evt.TimestampTicks <= toTicks)
+                {
+                    buffer[count++] = evt;
+                    
+                    if (count >= chunkSize)
+                    {
+                        processor(buffer.AsSpan(0, count));
+                        count = 0;
+                    }
+                }
+            }
+            
+            // Process remaining events
+            if (count > 0)
+            {
+                processor(buffer.AsSpan(0, count));
+            }
+        }, Buffers.EventPool);
     }
 }

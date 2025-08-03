@@ -1,5 +1,6 @@
 using System.Threading;
 using System.Runtime.CompilerServices;
+using System.Buffers;
 
 namespace LockFree.EventStore;
 
@@ -445,6 +446,56 @@ public sealed class LockFreeRingBuffer<T>
         }
         
         windowHeadIndex = newWindowHead;
+    }
+
+    /// <summary>
+    /// Zero-allocation snapshot using chunked processing with pooled buffers.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void SnapshotZeroAlloc<TBuffer>(Action<ReadOnlySpan<T>> processor, ArrayPool<T> pool, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        var buffer = pool.Rent(Math.Min(chunkSize, _capacity));
+        try
+        {
+            var len = Snapshot(buffer);
+            if (len > 0)
+            {
+                // Process in chunks
+                for (int i = 0; i < len; i += chunkSize)
+                {
+                    var chunkLen = Math.Min(chunkSize, len - i);
+                    processor(buffer.AsSpan(i, chunkLen));
+                }
+            }
+        }
+        finally
+        {
+            pool.Return(buffer, clearArray: false);
+        }
+    }    /// <summary>
+    /// Zero-allocation enumeration using callback processing.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ProcessItemsZeroAlloc<TState>(TState initialState, Func<TState, T, (TState State, bool Continue)> processor, out TState finalState)
+    {
+        var head = Volatile.Read(ref _head);
+        var tail = Volatile.Read(ref _tail);
+        var count = Math.Min(tail - head, _capacity);
+        
+        var state = initialState;
+        for (long i = 0; i < count; i++)
+        {
+            var index = (head + i) % _capacity;
+            var item = _buffer[index];
+            
+            var result = processor(state, item);
+            state = result.State;
+            
+            if (!result.Continue)
+                break; // Early termination
+        }
+        
+        finalState = state;
     }
 }
 

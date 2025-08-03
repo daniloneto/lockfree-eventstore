@@ -254,4 +254,108 @@ public sealed class LockFreeEventRingBuffer
         
         return (head, tail, epoch, count);
     }
+
+    /// <summary>
+    /// Zero-allocation snapshot using chunked processing with pooled buffers.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void SnapshotZeroAlloc(Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        var head = Volatile.Read(ref _head);
+        var tail = Volatile.Read(ref _tail);
+        var count = Math.Min(_capacity, tail - head);
+        
+        if (count == 0) return;
+        
+        Buffers.WithRentedBuffer<Event>(Math.Min(chunkSize, (int)count), buffer =>
+        {
+            var bufferCount = 0;
+            
+            for (long i = 0; i < count; i++)
+            {
+                var index = (int)((head + i) % _capacity);
+                buffer[bufferCount++] = _buffer[index];
+                
+                if (bufferCount >= buffer.Length)
+                {
+                    processor(buffer.AsSpan(0, bufferCount));
+                    bufferCount = 0;
+                }
+            }
+            
+            // Process remaining events
+            if (bufferCount > 0)
+            {
+                processor(buffer.AsSpan(0, bufferCount));
+            }
+        }, Buffers.EventPool);
+    }
+
+    /// <summary>
+    /// Zero-allocation filtered snapshot using chunked processing.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void SnapshotFilteredZeroAlloc(Func<Event, bool> predicate, Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        var head = Volatile.Read(ref _head);
+        var tail = Volatile.Read(ref _tail);
+        var count = Math.Min(_capacity, tail - head);
+        
+        if (count == 0) return;
+        
+        Buffers.WithRentedBuffer<Event>(chunkSize, buffer =>
+        {
+            var bufferCount = 0;
+            
+            for (long i = 0; i < count; i++)
+            {
+                var index = (int)((head + i) % _capacity);
+                var item = _buffer[index];
+                
+                if (predicate(item))
+                {
+                    buffer[bufferCount++] = item;
+                    
+                    if (bufferCount >= buffer.Length)
+                    {
+                        processor(buffer.AsSpan(0, bufferCount));
+                        bufferCount = 0;
+                    }
+                }
+            }
+            
+            // Process remaining events
+            if (bufferCount > 0)
+            {
+                processor(buffer.AsSpan(0, bufferCount));
+            }
+        }, Buffers.EventPool);
+    }
+
+    /// <summary>
+    /// Zero-allocation time range snapshot using chunked processing.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void SnapshotTimeRangeZeroAlloc(long fromTicks, long toTicks, Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        SnapshotFilteredZeroAlloc(e => e.TimestampTicks >= fromTicks && e.TimestampTicks <= toTicks, processor, chunkSize);
+    }
+
+    /// <summary>
+    /// Zero-allocation key-specific snapshot using chunked processing.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void SnapshotByKeyZeroAlloc(KeyId key, Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        SnapshotFilteredZeroAlloc(e => e.Key.Equals(key), processor, chunkSize);
+    }
+
+    /// <summary>
+    /// Zero-allocation key and time range snapshot using chunked processing.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void SnapshotByKeyAndTimeZeroAlloc(KeyId key, long fromTicks, long toTicks, Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        SnapshotFilteredZeroAlloc(e => e.Key.Equals(key) && e.TimestampTicks >= fromTicks && e.TimestampTicks <= toTicks, processor, chunkSize);
+    }
 }
