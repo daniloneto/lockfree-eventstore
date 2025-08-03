@@ -410,11 +410,12 @@ public sealed class EventStore<TEvent>
     /// </summary>
     public IEnumerable<TEvent> EnumerateSnapshot()
     {
+        var results = new List<TEvent>();
         foreach (var partition in _partitions)
         {
-            foreach (var e in partition.EnumerateSnapshot())
-                yield return e;
+            results.AddRange(partition.EnumerateSnapshot());
         }
+        return results;
     }
 
     private bool WithinWindow(TEvent e, DateTime? from, DateTime? to)
@@ -432,6 +433,7 @@ public sealed class EventStore<TEvent>
     /// </summary>
     public IEnumerable<TEvent> Query(Predicate<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
     {
+        var results = new List<TEvent>();
         foreach (var partition in _partitions)
         {
             foreach (var e in partition.EnumerateSnapshot())
@@ -439,9 +441,10 @@ public sealed class EventStore<TEvent>
                 if (!WithinWindow(e, from, to))
                     continue;
                 if (filter is null || filter(e))
-                    yield return e;
+                    results.Add(e);
             }
         }
+        return results;
     }
 
     /// <summary>

@@ -27,7 +27,7 @@ public readonly record struct KeyId(int Value)
 /// Internal mapping between string keys and KeyId values for hot path optimization.
 /// Thread-safe and designed for high-performance key resolution.
 /// </summary>
-internal sealed class KeyMap
+public sealed class KeyMap
 {
     private readonly ConcurrentDictionary<string, KeyId> _stringToId = 
         new(StringComparer.Ordinal);

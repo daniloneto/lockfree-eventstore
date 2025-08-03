@@ -1,0 +1,122 @@
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+namespace LockFree.EventStore;
+
+/// <summary>
+/// Extension methods for performing batch operations on Event arrays with high performance.
+/// </summary>
+public static class EventBatchOperations
+{
+    /// <summary>
+    /// Calculates the sum of values for a specific key in the event buffer.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double SumByKey(ReadOnlySpan<Event> events, KeyId key)
+    {
+        double sum = 0;
+        for (int i = 0; i < events.Length; i++)
+        {
+            if (events[i].Key.Value == key.Value)
+            {
+                sum += events[i].Value;
+            }
+        }
+        return sum;
+    }
+    
+    /// <summary>
+    /// Calculates the average of values for a specific key in the event buffer.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double AverageByKey(ReadOnlySpan<Event> events, KeyId key)
+    {
+        double sum = 0;
+        int count = 0;
+        
+        for (int i = 0; i < events.Length; i++)
+        {
+            if (events[i].Key.Value == key.Value)
+            {
+                sum += events[i].Value;
+                count++;
+            }
+        }
+        
+        return count > 0 ? sum / count : 0;
+    }
+    
+    /// <summary>
+    /// Finds events within a time range.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int FilterByTimeRange(ReadOnlySpan<Event> events, long fromTicks, long toTicks, Span<Event> output)
+    {
+        int count = 0;
+        for (int i = 0; i < events.Length; i++)
+        {
+            if (events[i].TimestampTicks >= fromTicks && events[i].TimestampTicks <= toTicks)
+            {
+                if (count < output.Length)
+                {
+                    output[count++] = events[i];
+                }
+                else
+                {
+                    break;
+                }
+            }
+        }
+        return count;
+    }
+    
+    /// <summary>
+    /// Gets the first and last timestamp from a span of events.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static (long firstTicks, long lastTicks) GetTimeRange(ReadOnlySpan<Event> events)
+    {
+        if (events.IsEmpty) return (0, 0);
+        return (events[0].TimestampTicks, events[^1].TimestampTicks);
+    }
+    
+    /// <summary>
+    /// Performs a parallel aggregation of events by key.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double[] AggregateByKeys(ReadOnlySpan<Event> events, ReadOnlySpan<KeyId> keys, Func<ReadOnlySpan<double>, double> aggregator)
+    {
+        if (keys.IsEmpty) return Array.Empty<double>();
+        
+        var results = new double[keys.Length];
+        var values = new List<double>[keys.Length];
+        
+        for (int i = 0; i < keys.Length; i++)
+        {
+            values[i] = new List<double>();
+        }
+        
+        // Collect values by key
+        for (int i = 0; i < events.Length; i++)
+        {
+            for (int k = 0; k < keys.Length; k++)
+            {
+                if (events[i].Key.Value == keys[k].Value)
+                {
+                    values[k].Add(events[i].Value);
+                    break;
+                }
+            }
+        }
+        
+        // Apply aggregation function
+        for (int i = 0; i < keys.Length; i++)
+        {
+            results[i] = values[i].Count > 0 
+                ? aggregator(CollectionsMarshal.AsSpan(values[i])) 
+                : 0;
+        }
+        
+        return results;
+    }
+}

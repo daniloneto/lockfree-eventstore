@@ -189,8 +189,10 @@ public sealed class LockFreeRingBuffer<T>
     {
         var tmp = new T[_capacity];
         var len = Snapshot(tmp);
+        var results = new List<T>(len);
         for (int i = 0; i < len; i++)
-            yield return tmp[i];
+            results.Add(tmp[i]);
+        return results;
     }
 
     /// <summary>
