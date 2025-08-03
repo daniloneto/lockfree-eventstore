@@ -52,7 +52,8 @@ public sealed class LockFreeRingBuffer<T>
     public bool TryEnqueue(T item)
     {
         var tail = Interlocked.Increment(ref _tail);
-        _buffer[(tail - 1) % _capacity] = item;
+        var index = (int)((tail - 1) % _capacity);
+        _buffer[index] = item;
         AdvanceHeadIfNeeded(tail);
         
         // Update epoch sparingly - only when tail advances significantly
@@ -62,11 +63,10 @@ public sealed class LockFreeRingBuffer<T>
         }
         
         return true;
-    }
-
-    /// <summary>
+    }/// <summary>
     /// Enqueues a batch of items.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int TryEnqueue(ReadOnlySpan<T> batch)
     {
         int written = 0;
@@ -76,7 +76,39 @@ public sealed class LockFreeRingBuffer<T>
             written++;
         }
         return written;
-    }    private void AdvanceHeadIfNeeded(long tail)
+    }
+
+    /// <summary>
+    /// Enqueues a batch of items with optimized epoch updating.
+    /// Only updates epoch once for the entire batch instead of per item.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int TryEnqueueBatch(ReadOnlySpan<T> batch)
+    {
+        if (batch.IsEmpty) return 0;
+        
+        // Reserve space for the entire batch atomically
+        var startTail = Interlocked.Add(ref _tail, batch.Length);
+        var endTail = startTail;
+        
+        // Write all items to their reserved positions
+        for (int i = 0; i < batch.Length; i++)
+        {
+            var position = startTail - batch.Length + i;
+            _buffer[position % _capacity] = batch[i];
+        }
+        
+        // Advance head if needed for the entire batch
+        AdvanceHeadIfNeeded(endTail);
+        
+        // Update epoch once for the batch
+        if ((endTail & 0xFF) == 0 || ((endTail - batch.Length) & 0xFF) > (endTail & 0xFF))
+        {
+            Interlocked.Increment(ref _epoch);
+        }
+        
+        return batch.Length;
+    }private void AdvanceHeadIfNeeded(long tail)
     {
         while (true)
         {
@@ -114,23 +146,43 @@ public sealed class LockFreeRingBuffer<T>
         // Reset pointers
         Volatile.Write(ref _head, 0);
         Volatile.Write(ref _tail, 0);
-    }
-
-    /// <summary>
+    }    /// <summary>
     /// Copies a snapshot of the buffer into <paramref name="destination"/>.
     /// </summary>
     /// <returns>Number of items copied.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int Snapshot(Span<T> destination)
     {
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
         var length = (int)Math.Min(Math.Min(tail - head, _capacity), destination.Length);
-        for (int i = 0; i < length; i++)
+        
+        if (length <= 0) return 0;
+        
+        var startIndex = (int)(head % _capacity);
+        
+        // Check if we need to handle wrap-around
+        if (startIndex + length <= _capacity)
         {
-            destination[i] = _buffer[(head + i) % _capacity];
+            // Single segment copy - can use fast span copy
+            var source = _buffer.AsSpan(startIndex, length);
+            source.CopyTo(destination);
         }
+        else
+        {
+            // Two-segment copy for wrap-around
+            var firstSegmentLength = _capacity - startIndex;
+            var secondSegmentLength = length - firstSegmentLength;
+            
+            var firstSource = _buffer.AsSpan(startIndex, firstSegmentLength);
+            var secondSource = _buffer.AsSpan(0, secondSegmentLength);
+            
+            firstSource.CopyTo(destination);
+            secondSource.CopyTo(destination.Slice(firstSegmentLength));
+        }
+        
         return length;
-    }    /// <summary>
+    }/// <summary>
     /// Convenience method that allocates an array and returns an enumerable.
     /// </summary>
     public IEnumerable<T> EnumerateSnapshot()

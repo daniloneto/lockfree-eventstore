@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Numerics;
 using System.Threading;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace LockFree.EventStore;
 
@@ -117,13 +118,15 @@ public sealed class EventStore<TEvent>
     }    /// <summary>
     /// Appends an event using the default partitioner.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryAppend(TEvent e)
     {
         var partition = Partitioners.ForKey(e, _partitions.Length);
         return TryAppend(e, partition);
-    }/// <summary>
+    }    /// <summary>
     /// Appends a batch of events using the default partitioner.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int TryAppend(ReadOnlySpan<TEvent> batch)
     {
         int written = 0;
@@ -136,8 +139,22 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
+    /// Appends a batch of events using the default partitioner with early termination on failure.
+    /// This version stops at the first failed append and returns the count of successful appends.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int TryAppendAll(ReadOnlySpan<TEvent> batch)
+    {
+        for (int i = 0; i < batch.Length; i++)
+        {
+            if (!TryAppend(batch[i]))
+                return i; // Return count of successful appends before failure
+        }
+        return batch.Length; // All succeeded
+    }/// <summary>
     /// Appends an event to the specified partition.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryAppend(TEvent e, int partition)
     {
         if ((uint)partition >= (uint)_partitions.Length)
@@ -792,5 +809,95 @@ public sealed class EventStore<TEvent>
                 state.Sum += selector(item);
             }
         };
+    }    /// <summary>
+    /// High-performance batch append using optimized ring buffer operations.
+    /// This version uses the optimized TryEnqueueBatch method for better performance.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int TryAppendBatch(ReadOnlySpan<TEvent> batch)
+    {
+        if (batch.IsEmpty) return 0;
+        
+        int totalWritten = 0;
+        
+        // For small batches, use simple approach to avoid allocation overhead
+        if (batch.Length <= 32)
+        {
+            foreach (var e in batch)
+            {
+                if (TryAppend(e))
+                    totalWritten++;
+            }
+            return totalWritten;
+        }
+        
+        // For larger batches, group by partition
+        var partitionArrays = new TEvent[_partitions.Length][];
+        var partitionCounts = new int[_partitions.Length];
+        
+        // First pass: count events per partition
+        foreach (var e in batch)
+        {
+            var partition = Partitioners.ForKey(e, _partitions.Length);
+            partitionCounts[partition]++;
+        }
+        
+        // Allocate arrays for each partition
+        for (int i = 0; i < _partitions.Length; i++)
+        {
+            if (partitionCounts[i] > 0)
+            {
+                partitionArrays[i] = new TEvent[partitionCounts[i]];
+            }
+        }
+        
+        // Second pass: distribute events to partition arrays
+        Array.Clear(partitionCounts, 0, partitionCounts.Length); // Reuse as index counters
+        foreach (var e in batch)
+        {
+            var partition = Partitioners.ForKey(e, _partitions.Length);
+            if (partitionArrays[partition] != null)
+            {
+                partitionArrays[partition][partitionCounts[partition]++] = e;
+            }
+        }
+        
+        // Batch append to each partition
+        for (int i = 0; i < _partitions.Length; i++)
+        {
+            if (partitionArrays[i] != null)
+            {
+                var written = _partitions[i].TryEnqueueBatch(partitionArrays[i]);
+                totalWritten += written;
+                
+                // Update statistics
+                for (int j = 0; j < written; j++)
+                {
+                    _statistics.RecordAppend();
+                }
+            }
+        }
+        
+        return totalWritten;
+    }
+
+    /// <summary>
+    /// Optimized batch append for single partition scenarios.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int TryAppendBatch(ReadOnlySpan<TEvent> batch, int partition)
+    {
+        if ((uint)partition >= (uint)_partitions.Length)
+            throw new ArgumentOutOfRangeException(nameof(partition));
+            
+        var written = _partitions[partition].TryEnqueueBatch(batch);
+        
+        // Update statistics
+        for (int i = 0; i < written; i++)
+        {
+            _statistics.RecordAppend();
+        }
+        
+        return written;
     }
 }
