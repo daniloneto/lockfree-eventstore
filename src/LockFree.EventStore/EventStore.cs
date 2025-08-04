@@ -11,8 +11,7 @@ namespace LockFree.EventStore;
 /// In-memory partitioned event store using lock-free ring buffers.
 /// </summary>
 public sealed class EventStore<TEvent>
-{
-    private readonly LockFreeRingBuffer<TEvent>[]? _partitions;
+{    private readonly LockFreeRingBuffer<TEvent>[]? _partitions;
     private readonly PaddedLockFreeRingBuffer<TEvent>[]? _paddedPartitions;
     private readonly bool _usePadding;
     private readonly IEventTimestampSelector<TEvent>? _ts;
@@ -22,6 +21,12 @@ public sealed class EventStore<TEvent>
     
     // Window state per partition for incremental aggregation
     private readonly PartitionWindowState[] _windowStates;
+
+    // Internal telemetry counters
+    private long _appendCount;
+    private long _droppedCount;
+    private long _snapshotBytesExposed;
+    private long _windowAdvanceCount;
 
     /// <summary>
     /// Initializes a new instance with default options.
@@ -63,12 +68,11 @@ public sealed class EventStore<TEvent>
             // Use padded ring buffers for high-performance MPMC scenarios
             _paddedPartitions = new PaddedLockFreeRingBuffer<TEvent>[_options.Partitions];
             _partitions = null;
-            
-            for (int i = 0; i < _paddedPartitions.Length; i++)
+              for (int i = 0; i < _paddedPartitions.Length; i++)
             {
                 _paddedPartitions[i] = new PaddedLockFreeRingBuffer<TEvent>(
                     capacityPerPartition, 
-                    _options.OnEventDiscarded != null ? OnEventDiscardedInternal : null);
+                    OnEventDiscardedInternal); // Always pass the internal callback for stats tracking
             }
         }
         else
@@ -76,12 +80,11 @@ public sealed class EventStore<TEvent>
             // Use standard ring buffers for compatibility
             _partitions = new LockFreeRingBuffer<TEvent>[_options.Partitions];
             _paddedPartitions = null;
-            
-            for (int i = 0; i < _partitions.Length; i++)
+              for (int i = 0; i < _partitions.Length; i++)
             {
                 _partitions[i] = new LockFreeRingBuffer<TEvent>(
                     capacityPerPartition, 
-                    _options.OnEventDiscarded != null ? OnEventDiscardedInternal : null);
+                    OnEventDiscardedInternal); // Always pass the internal callback for stats tracking
             }
         }
         
@@ -172,7 +175,85 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Statistics and metrics for this store.
     /// </summary>
-    public EventStoreStatistics Statistics => _statistics;
+    public EventStoreStatistics Statistics => _statistics;    /// <summary>
+    /// Attempts to retrieve current telemetry statistics for this store.
+    /// </summary>
+    /// <param name="stats">When this method returns true, contains the current store statistics.</param>
+    /// <returns>Always returns true. This method is designed for future extensibility where stat collection might be conditionally available.</returns>
+    public bool TryGetStats(out StoreStats stats)
+    {
+        stats = GetCurrentStatsSnapshot();
+        return true;
+    }
+
+    /// <summary>
+    /// Creates a snapshot of current store statistics.
+    /// </summary>
+    private StoreStats GetCurrentStatsSnapshot()
+    {
+        return new StoreStats(
+            appendCount: Interlocked.Read(ref _appendCount),
+            droppedCount: Interlocked.Read(ref _droppedCount),
+            snapshotBytesExposed: Interlocked.Read(ref _snapshotBytesExposed),
+            windowAdvanceCount: Interlocked.Read(ref _windowAdvanceCount)
+        );
+    }
+
+    /// <summary>
+    /// Notifies subscribers when statistics are updated.
+    /// </summary>
+    private void NotifyStatsUpdated()
+    {
+        var handler = _options.OnStatsUpdated;
+        if (handler is not null)
+        {
+            try
+            {
+                var stats = GetCurrentStatsSnapshot();
+                handler(stats);
+            }
+            catch
+            {
+                // Silently ignore exceptions from user callback to avoid breaking event flow
+            }
+        }
+    }
+
+    /// <summary>
+    /// Increments append count and notifies statistics update.
+    /// </summary>
+    private void IncrementAppendCount(int delta = 1)
+    {
+        Interlocked.Add(ref _appendCount, delta);
+        NotifyStatsUpdated();
+    }
+
+    /// <summary>
+    /// Increments dropped count and notifies statistics update.
+    /// </summary>
+    private void IncrementDroppedCount(int delta = 1)
+    {
+        Interlocked.Add(ref _droppedCount, delta);
+        NotifyStatsUpdated();
+    }
+
+    /// <summary>
+    /// Increments snapshot bytes exposed and notifies statistics update.
+    /// </summary>
+    private void IncrementSnapshotBytesExposed(long delta)
+    {
+        Interlocked.Add(ref _snapshotBytesExposed, delta);
+        NotifyStatsUpdated();
+    }
+
+    /// <summary>
+    /// Increments window advance count and notifies statistics update.
+    /// </summary>
+    private void IncrementWindowAdvanceCount(int delta = 1)
+    {
+        Interlocked.Add(ref _windowAdvanceCount, delta);
+        NotifyStatsUpdated();
+    }
 
     /// <summary>
     /// Gets the timestamp selector used by this store.
@@ -187,16 +268,17 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Gets all registered key mappings (for debugging/monitoring).
     /// </summary>
-    public IReadOnlyDictionary<string, KeyId> GetKeyMappings() => _keyMap.GetAllMappings();
-
-    private void OnEventDiscardedInternal(TEvent evt)
+    public IReadOnlyDictionary<string, KeyId> GetKeyMappings() => _keyMap.GetAllMappings();    private void OnEventDiscardedInternal(TEvent evt)
     {
         _statistics.RecordDiscard();
+        IncrementDroppedCount();
+        
+        // Only call user callback if provided
         _options.OnEventDiscarded?.Invoke(evt);
         
         if (IsFull)
             _options.OnCapacityReached?.Invoke();
-    }    /// <summary>
+    }/// <summary>
     /// Appends an event using the default partitioner.
     /// </summary>    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryAppend(TEvent e)
@@ -229,18 +311,31 @@ public sealed class EventStore<TEvent>
         {
             if (!TryAppend(batch[i]))
                 return i; // Return count of successful appends before failure
-        }
-        return batch.Length; // All succeeded
-    }/// <summary>
+        }        return batch.Length; // All succeeded
+    }
+
+    /// <summary>
     /// Appends an event to the specified partition.
-    /// </summary>    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryAppend(TEvent e, int partition)
     {
         if ((uint)partition >= (uint)GetPartitionCount())
             throw new ArgumentOutOfRangeException(nameof(partition));
         var result = TryEnqueueToPartition(partition, e);
         if (result)
+        {
             _statistics.RecordAppend();
+            IncrementAppendCount();
+            
+            // Check for window advancement if timestamp selector is available
+            if (_ts != null && _options.WindowSizeTicks.HasValue)
+            {
+                var eventTimestamp = _ts.GetTimestamp(e);
+                ref var windowState = ref _windowStates[partition];
+                AdvancePartitionWindow(ref windowState, eventTimestamp.Ticks);
+            }
+        }
         return result;
     }
 
@@ -437,17 +532,25 @@ public sealed class EventStore<TEvent>
                     tempBuffer.AsSpan(0, actualLen).CopyTo(result.AsSpan(idx));
                     idx += actualLen;
                 }
-            }
-            
+            }            
             // Trim result array if needed
             if (idx < result.Length)
             {
                 var trimmed = new TEvent[idx];
                 result.AsSpan(0, idx).CopyTo(trimmed);
+                  // Track snapshot bytes exposed (approximate size calculation)
+                var bytesExposed = (long)idx * sizeof(long); // Conservative estimate
+                IncrementSnapshotBytesExposed(bytesExposed);
+                
                 return trimmed;
             }
-            
-            return result;
+            else
+            {                // Track snapshot bytes exposed for full result (approximate size calculation)
+                var totalBytesExposed = (long)result.Length * sizeof(long); // Conservative estimate
+                IncrementSnapshotBytesExposed(totalBytesExposed);
+                
+                return result;
+            }
         }
         finally
         {
@@ -942,13 +1045,16 @@ public sealed class EventStore<TEvent>
     /// Advances the window for a partition based on current timestamp and fixed window size.
     /// Removes events older than (currentTimestamp - WindowSizeTicks) from the window state.
     /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void AdvancePartitionWindow(ref PartitionWindowState state, long currentTimestamp)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]    private void AdvancePartitionWindow(ref PartitionWindowState state, long currentTimestamp)
     {
         if (_ts == null) return;
         
         var windowSizeTicks = _options.WindowSizeTicks ?? TimeSpan.FromMinutes(5).Ticks;
         var windowStartTicks = currentTimestamp - windowSizeTicks;
+        
+        // Capture old window boundaries before updating
+        var oldWindowStartTicks = state.WindowStartTicks;
+        var oldWindowEndTicks = state.WindowEndTicks;
         
         // Update window boundaries
         state.WindowStartTicks = windowStartTicks;
@@ -1005,10 +1111,13 @@ public sealed class EventStore<TEvent>
                     }
                 }
             }
-        }
-        
-        // Update the original state
+        }          // Update the original state
         state = tempState;
+        // Increment window advance counter when boundaries actually change
+        if (oldWindowStartTicks != windowStartTicks || oldWindowEndTicks != currentTimestamp)
+        {
+            IncrementWindowAdvanceCount();
+        }
     }
 
     /// <summary>
@@ -1259,15 +1368,16 @@ public sealed class EventStore<TEvent>
         for (int i = 0; i < partitionCount; i++)
         {
             if (partitionArrays[i] != null)
-            {
-                var written = TryEnqueueBatchToPartition(i, partitionArrays[i]);
+            {                var written = TryEnqueueBatchToPartition(i, partitionArrays[i]);
                 totalWritten += written;
-                
-                // Update statistics
+                  // Update statistics
                 for (int j = 0; j < written; j++)
                 {
                     _statistics.RecordAppend();
                 }
+                
+                // Update telemetry counter for successful appends
+                IncrementAppendCount(written);
             }
         }
         
@@ -1280,14 +1390,15 @@ public sealed class EventStore<TEvent>
     {
         if ((uint)partition >= (uint)GetPartitionCount())
             throw new ArgumentOutOfRangeException(nameof(partition));
-            
-        var written = TryEnqueueBatchToPartition(partition, batch);
-        
-        // Update statistics
+              var written = TryEnqueueBatchToPartition(partition, batch);
+          // Update statistics
         for (int i = 0; i < written; i++)
         {
             _statistics.RecordAppend();
         }
+        
+        // Update telemetry counter for successful appends
+        IncrementAppendCount(written);
         
         return written;
     }    /// <summary>
@@ -1298,42 +1409,54 @@ public sealed class EventStore<TEvent>
     {
         var partitionCount = GetPartitionCount();
         for (int i = 0; i < partitionCount; i++)
-        {
-            if (_usePadding)
+        {            if (_usePadding)
             {
                 // Use generic array pool for T
                 var pool = ArrayPool<TEvent>.Shared;
                 var partition = _paddedPartitions![i];
-                
-                // Fallback implementation for padded partitions
+                  // Fallback implementation for padded partitions
                 var tempBuffer = new TEvent[partition.Capacity];
                 var len = partition.Snapshot(tempBuffer);
                 for (int j = 0; j < len; j += chunkSize)
                 {
                     var chunkLen = Math.Min(chunkSize, len - j);
-                    processor(tempBuffer.AsSpan(j, chunkLen));
+                    var chunk = tempBuffer.AsSpan(j, chunkLen);
+                    
+                    // Track bytes exposed for each chunk
+                    var bytesExposed = (long)chunkLen * sizeof(long); // Conservative estimate
+                    IncrementSnapshotBytesExposed(bytesExposed);
+                    
+                    processor(chunk);
                 }
             }
             else
-            {
-                // Use zero-allocation method for standard partitions
+            {                // Use zero-allocation method for standard partitions
                 var partition = _partitions![i];
                 if (partition is LockFreeRingBuffer<TEvent> typedPartition)
                 {
                     // Use generic array pool for T
-                    var pool = ArrayPool<TEvent>.Shared;
-                    typedPartition.SnapshotZeroAlloc<TEvent>(processor, pool, chunkSize);                }                else
+                    var pool = ArrayPool<TEvent>.Shared;                    typedPartition.SnapshotZeroAlloc<TEvent>((span) => {
+                        // Track bytes exposed for each chunk
+                        var bytesExposed = (long)span.Length * sizeof(long); // Conservative estimate
+                        IncrementSnapshotBytesExposed(bytesExposed);
+                        processor(span);
+                    }, pool, chunkSize);}                else
                 {
                     // Fallback for other partition types
                     var ringBuffer = _partitions![i];
                     var tempBuffer = new TEvent[ringBuffer.Capacity];
                     var len = ringBuffer.Snapshot(tempBuffer);
                     if (len > 0)
-                    {
-                        for (int j = 0; j < len; j += chunkSize)
+                    {                        for (int j = 0; j < len; j += chunkSize)
                         {
                             var chunkLen = Math.Min(chunkSize, len - j);
-                            processor(tempBuffer.AsSpan(j, chunkLen));
+                            var chunk = tempBuffer.AsSpan(j, chunkLen);
+                            
+                            // Track bytes exposed for each chunk
+                            var bytesExposed = (long)chunkLen * sizeof(long); // Conservative estimate
+                            IncrementSnapshotBytesExposed(bytesExposed);
+                            
+                            processor(chunk);
                         }
                     }
                 }
@@ -1366,20 +1489,24 @@ public sealed class EventStore<TEvent>
                     var item = tempBuffer[i];
                     if (filter(item))
                     {
-                        buffer[bufferCount++] = item;
-                        
-                        if (bufferCount >= buffer.Length)
+                        buffer[bufferCount++] = item;                        if (bufferCount >= buffer.Length)
                         {
+                            // Track bytes exposed for each chunk
+                            var bytesExposed = (long)bufferCount * sizeof(long); // Conservative estimate
+                            IncrementSnapshotBytesExposed(bytesExposed);
+                            
                             processor(buffer.AsSpan(0, bufferCount));
                             bufferCount = 0;
                         }
                     }
                 }
-            }
-            
-            // Process remaining events
+            }            // Process remaining events
             if (bufferCount > 0)
             {
+                // Track bytes exposed for remaining events
+                var bytesExposed = (long)bufferCount * sizeof(long); // Conservative estimate
+                IncrementSnapshotBytesExposed(bytesExposed);
+                
                 processor(buffer.AsSpan(0, bufferCount));
             }
         }

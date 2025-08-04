@@ -109,7 +109,7 @@ public sealed class LockFreeRingBuffer<T>
         }
         
         return batch.Length;
-    }private void AdvanceHeadIfNeeded(long tail)
+    }    private void AdvanceHeadIfNeeded(long tail)
     {
         while (true)
         {
@@ -117,13 +117,18 @@ public sealed class LockFreeRingBuffer<T>
             if (tail - head <= _capacity)
                 break;
             
-            // Notify about discarded item if callback is provided
-            var discardedIndex = head % _capacity;
-            var discardedItem = _buffer[discardedIndex];
-            _onItemDiscarded?.Invoke(discardedItem);
-            
+            // Try to advance head atomically
             if (Interlocked.CompareExchange(ref _head, head + 1, head) == head)
+            {
+                // Only notify about discarded item if we successfully advanced the head
+                if (_onItemDiscarded != null)
+                {
+                    var discardedIndex = head % _capacity;
+                    var discardedItem = _buffer[discardedIndex];
+                    _onItemDiscarded(discardedItem);
+                }
                 break;
+            }
         }
     }
 
