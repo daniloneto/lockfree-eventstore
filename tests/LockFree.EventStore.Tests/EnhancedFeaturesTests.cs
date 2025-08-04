@@ -32,7 +32,7 @@ public sealed class EnhancedFeaturesTests
         var discardedEvents = new List<Order>();
         var capacityReachedCount = 0;
 
-        var store = EventStore.For<Order>()
+        var store = new EventStoreBuilder<Order>()
             .WithCapacity(100)
             .WithPartitions(2)
             .OnDiscarded(evt => discardedEvents.Add(evt))
