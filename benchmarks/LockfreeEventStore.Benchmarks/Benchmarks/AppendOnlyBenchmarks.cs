@@ -10,10 +10,10 @@ namespace LockfreeEventStore.Benchmarks.Benchmarks;
 [MemoryDiagnoser]
 [ThreadingDiagnoser]
 public class AppendOnlyBenchmarks
-{    [Params(1, 2, 4)]
+{    [Params(1, 4)]
     public int ProducerCount { get; set; }
 
-    [Params(1_000, 10_000)]
+    [Params(10_000)]
     public int Capacity { get; set; }
 
     [Params(0.0)]

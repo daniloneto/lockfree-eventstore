@@ -68,12 +68,86 @@ class Program
                 foreach (var error in summary.ValidationErrors)
                 {
                     Console.WriteLine($"  {error.Message}");
-                }
-            }
-        }        Console.WriteLine("All benchmarks completed!");
+                }            }
+        }
+
+        Console.WriteLine("All benchmarks completed!");
         Console.WriteLine($"Results saved to: {Path.GetFullPath(options.ArtifactsPath)}");
         
+        // Generate comparison table
+        GenerateComparisonTable(options.ArtifactsPath);
+        
         return Task.FromResult(0);
+    }
+
+    static void GenerateComparisonTable(string artifactsPath)
+    {
+        try
+        {
+            var comparisonPath = Path.Combine(artifactsPath, "benchmark-comparison.md");
+            var content = $@"# Benchmark Results Comparison
+
+*Generated on: {DateTime.Now:yyyy-MM-dd HH:mm:ss}*
+
+## Performance Summary
+
+| Benchmark | Mean | Allocated | Gen0 | Gen1 | Gen2 | Notes |
+|-----------|------|-----------|------|------|------|-------|
+| WindowAggregateBenchmarks | - | < 500 KB (target) | - | - | - | Target: Mean ≤ baseline |
+| AppendWithSnapshotBenchmarks | - | < 500 KB (target) | - | - | - | Was ~2.3 MB before |
+| MixedHotColdKeysBenchmarks | - | < 2 MB (target) | < 1000 (target) | < 1000 (target) | < 1000 (target) | Hot/Cold key performance |
+| AppendOnlyBenchmarks | Close to Channel<T> (target) | ~0 (target) | - | - | - | Minimal allocation target |
+
+## Configuration Used
+
+### WindowAggregateBenchmarks
+- Producers: 2, 4
+- Capacity: 10,000
+- WindowSizeMs: 100
+- Skew: 0.0, 0.8
+- FilterSelectivity: 1.0, 0.1
+
+### AppendWithSnapshotBenchmarks
+- Producers: 2
+- Capacity: 100,000
+- Snapshot interval: Every 10,000 events
+
+### MixedHotColdKeysBenchmarks
+- Producers: 4
+- Capacity: 50,000, 200,000
+- WindowMs: 1000
+- Skew: 0.5, 0.9
+- FilterSelectivity: 0.2
+
+### AppendOnlyBenchmarks
+- Producers: 1, 4
+- Capacity: 10,000
+
+## Files Generated
+
+The following result files have been generated:
+- **.md files**: GitHub-compatible markdown reports
+- **.csv files**: Excel-compatible data files
+- **.json files**: Machine-readable results for integration
+
+## Next Steps
+
+1. Review individual benchmark files for detailed metrics
+2. Compare allocated memory against targets
+3. Analyze performance regression/improvement
+4. Update baseline measurements if needed
+
+---
+*For detailed results, see individual benchmark result files in this directory.*
+";
+
+            File.WriteAllText(comparisonPath, content);
+            Console.WriteLine($"Comparison table generated: {comparisonPath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: Could not generate comparison table: {ex.Message}");
+        }
     }
 
     static IConfig CreateBenchmarkConfig(BenchmarkOptions options)

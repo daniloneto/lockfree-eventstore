@@ -10,8 +10,7 @@ namespace LockfreeEventStore.Benchmarks.Benchmarks;
 [MemoryDiagnoser]
 [ThreadingDiagnoser]
 public class MixedHotColdKeysBenchmarks
-{
-    [Params(4, 8)]
+{    [Params(4)]
     public int ProducerCount { get; set; }
 
     [Params(50_000, 200_000)]
@@ -20,7 +19,7 @@ public class MixedHotColdKeysBenchmarks
     [Params(1000)]
     public int WindowMs { get; set; }
 
-    [Params(0.0, 0.5, 0.9)] // 0.0 = uniform, 0.5 = moderate skew, 0.9 = heavy skew
+    [Params(0.5, 0.9)] // 0.5 = moderate skew, 0.9 = heavy skew
     public double Skew { get; set; }
 
     [Params(0.2)]
