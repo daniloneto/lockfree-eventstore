@@ -45,3 +45,5 @@ coverage*
 
 # Ignore generated files
 *.generated.cs
+
+*.ps1
