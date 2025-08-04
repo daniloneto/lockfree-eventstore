@@ -67,23 +67,8 @@ public sealed class EventStoreBuilder<TEvent>
             Partitions = _partitions ?? Environment.ProcessorCount,
             OnEventDiscarded = _onEventDiscarded,
             OnCapacityReached = _onCapacityReached,
-            TimestampSelector = _timestampSelector
-        };
+            TimestampSelector = _timestampSelector        };
 
         return new EventStore<TEvent>(options);
-    }
-}
-
-/// <summary>
-/// Static factory methods for EventStore creation.
-/// </summary>
-public static class EventStore
-{
-    /// <summary>
-    /// Creates a new fluent builder for EventStore&lt;TEvent&gt;.
-    /// </summary>
-    public static EventStoreBuilder<TEvent> For<TEvent>()
-    {
-        return new EventStoreBuilder<TEvent>();
     }
 }

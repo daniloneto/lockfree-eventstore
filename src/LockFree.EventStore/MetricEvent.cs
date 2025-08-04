@@ -16,4 +16,11 @@ public sealed class MetricTimestampSelector : IEventTimestampSelector<MetricEven
     /// <param name="e">The metric event.</param>
     /// <returns>The timestamp of the event.</returns>
     public DateTime GetTimestamp(MetricEvent e) => e.Timestamp;
+    
+    /// <summary>
+    /// Gets the timestamp ticks from a MetricEvent.
+    /// </summary>
+    /// <param name="e">The metric event.</param>
+    /// <returns>The timestamp ticks of the event.</returns>
+    public long GetTimestampTicks(MetricEvent e) => e.Timestamp.Ticks;
 }

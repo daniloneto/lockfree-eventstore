@@ -49,6 +49,31 @@ public sealed class EventStoreStatistics
     {
         Interlocked.Increment(ref _totalDiscarded);
     }
+    
+    /// <summary>
+    /// Increments the total added counter by 1.
+    /// </summary>
+    internal void IncrementTotalAdded()
+    {
+        Interlocked.Increment(ref _totalAppended);
+        _lastAppendTime = DateTime.UtcNow;
+    }
+    
+    /// <summary>
+    /// Increments the total added counter by the specified amount.
+    /// </summary>
+    internal void IncrementTotalAdded(int count)
+    {
+        Interlocked.Add(ref _totalAppended, count);
+        _lastAppendTime = DateTime.UtcNow;
+    }
+      /// <summary>
+    /// Increments the overwritten counter.
+    /// </summary>
+    internal void IncrementOverwritten()
+    {
+        Interlocked.Increment(ref _totalDiscarded);
+    }
 
     internal void Reset()
     {
