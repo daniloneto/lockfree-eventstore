@@ -10,14 +10,13 @@ namespace LockfreeEventStore.Benchmarks.Benchmarks;
 [MemoryDiagnoser]
 [ThreadingDiagnoser]
 public class AppendWithSnapshotBenchmarks
-{
-    [Params(2, 4, 8)]
+{    [Params(2)]
     public int ProducerCount { get; set; }
 
-    [Params(10_000, 100_000)]
+    [Params(100_000)]
     public int Capacity { get; set; }
 
-    [Params(0.0, 0.8)]
+    [Params(0.0)]
     public double Skew { get; set; }
 
     [Params("EventStore", "ChannelBounded", "ConcurrentQueue"
@@ -30,10 +29,9 @@ public class AppendWithSnapshotBenchmarks
     private IEventStoreCompetitor _store = null!;
     private BenchmarkEvent[] _events = null!;
     private CancellationTokenSource _cts = null!;
-    
-    private const int EventsPerProducer = 5_000;
+      private const int EventsPerProducer = 5_000;
     private const int KeyCount = 1000;
-    private const int SnapshotIntervalMs = 100;
+    private const int SnapshotInterval = 10_000; // Snapshot every 10,000 events
 
     [GlobalSetup]
     public void Setup()
@@ -63,13 +61,13 @@ public class AppendWithSnapshotBenchmarks
     {
         _cts?.Cancel();
         _cts?.Dispose();
-    }
-
-    [Benchmark]
+    }    [Benchmark]
     public async Task AppendWithPeriodicSnapshots()
     {
         var eventsPerThread = EventsPerProducer;
         var totalEvents = eventsPerThread * ProducerCount;
+        var eventsProcessed = 0;
+        var lockObj = new object();
 
         // Start snapshot task
         var snapshotTask = Task.Run(async () =>
@@ -78,8 +76,18 @@ public class AppendWithSnapshotBenchmarks
             {
                 try
                 {
-                    _store.Snapshot();
-                    await Task.Delay(SnapshotIntervalMs, _cts.Token);
+                    int currentCount;
+                    lock (lockObj)
+                    {
+                        currentCount = eventsProcessed;
+                    }
+                    
+                    if (currentCount > 0 && currentCount % SnapshotInterval == 0)
+                    {
+                        _store.Snapshot();
+                    }
+                    
+                    await Task.Delay(10, _cts.Token); // Small delay to avoid busy waiting
                 }
                 catch (OperationCanceledException)
                 {
@@ -101,6 +109,11 @@ public class AppendWithSnapshotBenchmarks
                 for (int i = startIndex; i < endIndex && i < totalEvents; i++)
                 {
                     _store.TryAppend(_events[i]);
+                    
+                    lock (lockObj)
+                    {
+                        eventsProcessed++;
+                    }
                     
                     if (_cts.Token.IsCancellationRequested)
                         break;

@@ -17,12 +17,12 @@ public class WindowAggregateBenchmarks
     public int Capacity { get; set; }
 
     [Params(100)]
-    public int WindowMs { get; set; }
+    public int WindowSizeMs { get; set; }
 
-    [Params(0.0)]
+    [Params(0.0, 0.8)]
     public double Skew { get; set; }
 
-    [Params(1.0)]
+    [Params(1.0, 0.1)]
     public double FilterSelectivity { get; set; }
 
     [Params("EventStore", "ChannelBounded", "ConcurrentQueue"
@@ -70,11 +70,10 @@ public class WindowAggregateBenchmarks
         _cts?.Cancel();
         _cts?.Dispose();
     }    [Benchmark]
-    public long ProducersWithWindowQueries()
-    {
+    public long ProducersWithWindowQueries()    {
         var eventsPerThread = EventsPerProducer;
         var totalEvents = eventsPerThread * ProducerCount;
-        var windowTimeSpan = TimeSpan.FromMilliseconds(WindowMs);
+        var windowTimeSpan = TimeSpan.FromMilliseconds(WindowSizeMs);
         long totalQueries = 0;
 
         // Start query task
@@ -168,11 +167,10 @@ public class WindowAggregateBenchmarks
     }
 
     [Benchmark]
-    public long SimpleProducersWithQueries()
-    {
+    public long SimpleProducersWithQueries()    {
         var eventsPerThread = EventsPerProducer;
         var totalEvents = eventsPerThread * ProducerCount;
-        var windowTimeSpan = TimeSpan.FromMilliseconds(WindowMs);
+        var windowTimeSpan = TimeSpan.FromMilliseconds(WindowSizeMs);
         long totalQueries = 0;
 
         // Fill store with events first
