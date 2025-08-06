@@ -7,11 +7,15 @@
     <PackageTags>dotnet;eventstore;lock-free;concurrency;in-memory;partitioning;aot;trimming</PackageTags>
     <RepositoryUrl>https://github.com/daniloneto/lockfree-eventstore</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <IncludeSymbols>true</IncludeSymbols>
+    <PackageReleaseNotes>v1.0.1: Update project metadata and enhance README with new features and examples</PackageReleaseNotes>
+    <Copyright>Copyright (c) 2025 LockFree.EventStore Contributors</Copyright>
+    <IncludeSymbols>true</IncludeSymbols>    
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="" />
+    <None Include="LICENSE.md" Pack="true" PackagePath="" />
+    <None Include="CHANGELOG.md" Pack="true" PackagePath="" />
   </ItemGroup>
 </Project>
