@@ -21,11 +21,8 @@ var total = store.Aggregate(() => 0m, (acc, e) => acc + e.Amount,
     from: DateTime.UtcNow.AddMinutes(-10));
 ```
 
-## Construtores Disponíveis
+## Novos Construtores
 ```csharp
-// Construtor padrão
-var store = new EventStore<Order>();
-
 // Capacidade explícita
 var store = new EventStore<Order>(capacity: 100_000);
 
@@ -52,18 +49,147 @@ var store = EventStore.For<Order>()
     .Create();
 ```
 
+## Propriedades de Estado
+```csharp
+store.Count          // Número atual de eventos
+store.Capacity       // Capacidade máxima configurada
+store.IsEmpty        // Se está vazio
+store.IsFull         // Se atingiu capacidade máxima
+store.Partitions     // Número de partições
+```
+
+## Agregações Especializadas
+```csharp
+// Contagem por janela temporal
+var count = store.Count(from: start, to: end);
+
+// Soma de valores
+var sum = store.Sum(evt => evt.Amount, from: start, to: end);
+
+// Média
+var avg = store.Average(evt => evt.Value, from: start, to: end);
+
+// Mínimo e máximo
+var min = store.Min(evt => evt.Score, from: start, to: end);
+var max = store.Max(evt => evt.Score, from: start, to: end);
+
+// Com filtros
+var filteredSum = store.Sum(
+    evt => evt.Amount, 
+    filter: evt => evt.Type == "Payment",
+    from: start, 
+    to: end
+);
+```
+
+## Snapshots com Filtros
+```csharp
+// Snapshot filtrado
+var recentEvents = store.Snapshot(
+    filter: evt => evt.Timestamp > DateTime.UtcNow.AddMinutes(-5)
+);
+
+// Snapshot por janela temporal
+var snapshot = store.Snapshot(from: start, to: end);
+
+// Snapshot com filtro e janela temporal
+var filtered = store.Snapshot(
+    filter: evt => evt.Amount > 100,
+    from: start,
+    to: end
+);
+```
+
+## Limpeza e Manutenção
+```csharp
+// Limpar todos os eventos
+store.Clear();
+store.Reset(); // Alias para Clear()
+
+// Purgar eventos antigos (requer TimestampSelector)
+store.Purge(olderThan: DateTime.UtcNow.AddHours(-1));
+```
+
+## Métricas e Observabilidade
+```csharp
+// Estatísticas detalhadas
+store.Statistics.TotalAppended        // Total de eventos adicionados
+store.Statistics.TotalDiscarded       // Total de eventos descartados
+store.Statistics.AppendsPerSecond     // Taxa atual de adições
+store.Statistics.LastAppendTime       // Timestamp da última adição
+```
+
+## Samples
+
+### MetricsDashboard
+API web completa para coleta e consulta de métricas em tempo real:
+
+```bash
+cd .\samples\MetricsDashboard\
+dotnet run
+```
+
+Endpoints disponíveis:
+- `POST /metrics` - Adicionar métrica
+- `GET /metrics/sum?label=cpu_usage` - Somar valores por label
+- `GET /metrics/top?k=5` - Top K métricas
+
+Veja `samples/MetricsDashboard/TESTING.md` para guia completo de testes.
+
 ## API Completa
 - `TryAppend(event)` — Adiciona evento, lock-free
-- `Aggregate` — Agrega valores por janela temporal com filtros opcionais
-- `Snapshot()` — Retorna cópia imutável dos eventos com filtros opcionais
-- `CountEvents/Sum/Average/Min/Max` — Agregações especializadas
-- `Clear/Reset/Purge` — Métodos de limpeza e manutenção
-- `Query` — Consultas flexíveis com filtros e janelas temporais
-- `Statistics` — Métricas para monitoramento e observabilidade
-- `Count/Capacity/IsEmpty/IsFull/Partitions` — Propriedades de estado
+- `Aggregate` — Agrega valores por janela temporal
+- `Snapshot()` — Retorna cópia imutável dos eventos
+- `Count/Sum/Average/Min/Max` — Agregações especializadas
+- `Clear/Reset/Purge` — Métodos de limpeza
+- `Query` — Consultas flexíveis com filtros
+- `Statistics` — Métricas para monitoramento
+
+## Partições
+O número de partições padrão é `Environment.ProcessorCount`. É possível forçar a partição usando `TryAppend(e, partition)`.
+
+## Snapshots
+`Snapshot()` retorna uma cópia imutável aproximada do estado atual de todas as partições, ordenada do evento mais antigo para o mais novo por partição.
 
 ## Performance
 Projetado para alta concorrência e baixa latência. A ordem global entre partições é aproximada.
+
+## Performance Benchmarks
+
+### Value Type vs Reference Type Events
+
+Benchmarks comparing the performance of value type events (`Event` struct) vs reference type events (`MetricEvent` class):
+
+| Operation                 | Value Type     | Reference Type  | Improvement |
+|---------------------------|----------------|-----------------|-------------|
+| Event Addition            | 560 ms         | 797 ms          | 42% faster  |
+| Event Iteration           | 35.8 ns        | 132.5 ns        | 74% faster  |
+| Event Queries             | 393.5 ns       | 1,749.1 ns      | 77% faster  |
+
+### Structure of Arrays (SoA) vs Array of Structures (AoS)
+
+Benchmarks comparing memory layout approaches:
+
+| Operation                 | SoA            | AoS             | Improvement |
+|---------------------------|----------------|-----------------|-------------|
+| Aggregation by Key        | 55.2 ms        | 74.6 ms         | 26% faster  |
+| Memory Usage              | Lower          | Higher          | Varies      |
+
+The benchmarks confirm that:
+1. Value types provide significantly better performance than reference types for both write and read operations
+2. The Structure of Arrays (SoA) approach improves cache locality and reduces memory pressure
+3. For high-throughput scenarios, the optimized EventStoreV2 implementation is recommended
+
+```csharp
+// Using the optimized EventStoreV2 with value types
+var store = new EventStoreV2(capacity: 1_000_000, partitions: 16);
+
+// Adding events with zero allocations
+store.Add("sensor1", 25.5, DateTime.UtcNow.Ticks);
+
+// Fast aggregation
+double average = store.Average("sensor1");
+```
 
 ## Limitações
 - Ordem global apenas aproximada entre partições
