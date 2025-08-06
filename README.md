@@ -1,4 +1,6 @@
 # LockFree.EventStore
+[![CI](https://github.com/daniloneto/lockfree-eventstore/actions/workflows/ci.yml/badge.svg)](https://github.com/daniloneto/lockfree-eventstore/actions)
+[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.EventStore)
 
 Event store em memória, genérico, de baixa latência e lock-free para .NET. Ideal para cenários de monitoramento, métricas e eventos de domínio.
 
