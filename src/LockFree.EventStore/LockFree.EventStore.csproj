@@ -1,14 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
-    <Version>1.0.3</Version>
+    <Version>1.0.5</Version>
     <Description>Event store em memória lock-free, genérico, com capacidade fixa, particionado e agregações funcionais.</Description>
     <PackageId>LockFree.EventStore</PackageId>
     <Authors>Danilo Neto</Authors>
     <PackageTags>dotnet;eventstore;lock-free;concurrency;in-memory;partitioning;aot;trimming</PackageTags>
     <RepositoryUrl>https://github.com/daniloneto/lockfree-eventstore</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReleaseNotes>v1.0.3: Endpoints genéricos de streams, agregação com durationMs, endpoints administrativos, samples GatewayClient & docker-compose + Nginx, scripts de cenário, Dockerfiles multi-stage, dependência Ulid.</PackageReleaseNotes>
+    <PackageReleaseNotes>v1.0.5: Endpoints genéricos de streams, agregação com durationMs, endpoints administrativos, samples GatewayClient &amp; docker-compose + Nginx, scripts de cenário, Dockerfiles multi-stage, dependência Ulid.</PackageReleaseNotes>
     <Copyright>Copyright (c) 2025 Danilo Neto</Copyright>
     <IncludeSymbols>true</IncludeSymbols>    
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>

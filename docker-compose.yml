@@ -1,10 +1,7 @@
 version: "3.9"
 services:
   eventstore:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: daniloneto/lockfree-eventstore:local
+    image: daniloneto/lockfree-eventstore:latest
     container_name: lf_eventstore
     ports:
       - "7070:7070"
@@ -31,6 +28,3 @@ services:
       - "8080:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
-
-# Build & run locally: docker compose up --build -d
-# Scale gateways: docker compose up -d --scale gateway=5
