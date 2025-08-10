@@ -47,3 +47,5 @@ coverage*
 *.generated.cs
 
 *.ps1
+
+publish.sh

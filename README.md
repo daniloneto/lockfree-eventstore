@@ -1,8 +1,64 @@
 # <img src="https://raw.githubusercontent.com/daniloneto/lockfree-eventstore/refs/heads/main/lockfreeeventstore.png" />
 [![CI](https://github.com/daniloneto/lockfree-eventstore/actions/workflows/ci.yml/badge.svg)](https://github.com/daniloneto/lockfree-eventstore/actions)
-[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.EventStore)
+[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.Event.Store)
 
-Event store em memória, genérico, de baixa latência e lock-free para .NET. Ideal para cenários de monitoramento, métricas e eventos de domínio.
+**Um banco de eventos em memória, rodando como serviço, para sincronizar e validar operações entre múltiplas instâncias com alta concorrência e sem travas.**
+
+---
+
+## 🚀 Comece em 3 passos
+
+### 1. Suba o servidor
+```bash
+docker run --rm -p 7070:7070 daniloneto/lockfree-eventstore:latest
+```
+
+### 2. Adicione o cliente
+```bash
+dotnet add package LockFree.EventStore
+```
+
+### 3. Escreva e leia
+```csharp
+var es = new EventStoreClient("http://localhost:7070");
+await es.Append("gateway/orders", new OrderCreated { Id = "o-1", Valor = 123 });
+await foreach (var ev in es.Read("gateway/orders", from: 0))
+{
+    /* tratar evento */
+}
+```
+
+### 🔁 Sample de Cliente
+Veja `samples/ClientSample` para um exemplo que:
+- Envia eventos em paralelo para `gateway/orders`
+- Lê os eventos de volta
+- Calcula agregações locais
+
+Para executar:
+```bash
+docker run --rm -p 7070:7070 daniloneto/lockfree-eventstore:latest
+cd samples/ClientSample
+ dotnet run
+```
+
+---
+
+## 💡 Por que usar
+- **Concorrência real:** múltiplos gravadores sem mutex.
+- **Integridade garantida:** ordenação consistente, append condicional e idempotência.
+- **Operação simples:** sem coordenação externa, sem dependências.
+
+---
+
+## 📌 Cenário típico
+Dois (ou mais) gateways atrás de um balanceador de carga precisam registrar operações no mesmo stream.  
+O **Lockfree.EventStore** garante ordem e integridade mesmo sob alto paralelismo, sem depender de locks, mantendo todo o estado em memória.
+
+---
+
+## 📚 Documentação completa
+
+A seguir, a documentação técnica completa da API, recursos avançados, benchmarks e exemplos de uso.
 
 ## Principais Recursos
 - Escrita MPMC lock-free com descarte FIFO
@@ -12,42 +68,42 @@ Event store em memória, genérico, de baixa latência e lock-free para .NET. Id
 - Zero dependências externas, pronto para AOT/Trimming
 - API fluente para configuração avançada
 - Métricas e observabilidade integradas
-- Agregações especializadas (Sum, Average, Min, Max)
+- Agregações especializadas (Soma, Média, Mínimo, Máximo)
 
 ## Exemplo de Uso Básico
 ```csharp
-var store = new EventStore<Order>();
-store.TryAppend(new Order { Id = 1, Amount = 10m, Timestamp = DateTime.UtcNow });
+var store = new EventStore<Pedido>();
+store.TryAppend(new Pedido { Id = 1, Valor = 10m, Timestamp = DateTime.UtcNow });
 
-var total = store.Aggregate(() => 0m, (acc, e) => acc + e.Amount,
+var total = store.Aggregate(() => 0m, (acc, e) => acc + e.Valor,
     from: DateTime.UtcNow.AddMinutes(-10));
 ```
 
 ## Novos Construtores
 ```csharp
 // Capacidade explícita
-var store = new EventStore<Order>(capacity: 100_000);
+var store = new EventStore<Pedido>(capacidade: 100_000);
 
 // Capacidade e partições
-var store = new EventStore<Order>(capacity: 50_000, partitions: 8);
+var store = new EventStore<Pedido>(capacidade: 50_000, particoes: 8);
 
 // Configuração avançada
-var store = new EventStore<Order>(new EventStoreOptions<Order>
+var store = new EventStore<Pedido>(new EventStoreOptions<Pedido>
 {
-    Capacity = 100_000,
-    Partitions = 16,
-    OnEventDiscarded = evt => Logger.LogTrace("Event discarded: {Event}", evt),
-    OnCapacityReached = () => Metrics.IncrementCounter("eventstore.capacity_reached"),
-    TimestampSelector = new OrderTimestampSelector()
+    Capacidade = 100_000,
+    Particoes = 16,
+    OnEventDiscarded = evt => Logger.LogTrace("Evento descartado: {Event}", evt),
+    OnCapacityReached = () => Metrics.IncrementCounter("eventstore.capacidade_atingida"),
+    TimestampSelector = new PedidoTimestampSelector()
 });
 
 // API fluente
-var store = EventStore.For<Order>()
+var store = EventStore.For<Pedido>()
     .WithCapacity(100_000)
     .WithPartitions(8)
     .OnDiscarded(evt => Log(evt))
-    .OnCapacityReached(() => NotifyAdmin())
-    .WithTimestampSelector(new OrderTimestampSelector())
+    .OnCapacityReached(() => NotificarAdmin())
+    .WithTimestampSelector(new PedidoTimestampSelector())
     .Create();
 ```
 
@@ -63,42 +119,42 @@ store.Partitions     // Número de partições
 ## Agregações Especializadas
 ```csharp
 // Contagem por janela temporal
-var count = store.Count(from: start, to: end);
+var count = store.Count(from: inicio, to: fim);
 
 // Soma de valores
-var sum = store.Sum(evt => evt.Amount, from: start, to: end);
+var sum = store.Sum(evt => evt.Valor, from: inicio, to: fim);
 
 // Média
-var avg = store.Average(evt => evt.Value, from: start, to: end);
+var avg = store.Average(evt => evt.Valor, from: inicio, to: fim);
 
 // Mínimo e máximo
-var min = store.Min(evt => evt.Score, from: start, to: end);
-var max = store.Max(evt => evt.Score, from: start, to: end);
+var min = store.Min(evt => evt.Pontuacao, from: inicio, to: fim);
+var max = store.Max(evt => evt.Pontuacao, from: inicio, to: fim);
 
 // Com filtros
 var filteredSum = store.Sum(
-    evt => evt.Amount, 
-    filter: evt => evt.Type == "Payment",
-    from: start, 
-    to: end
+    evt => evt.Valor, 
+    filter: evt => evt.Tipo == "Pagamento",
+    from: inicio, 
+    to: fim
 );
 ```
 
 ## Snapshots com Filtros
 ```csharp
 // Snapshot filtrado
-var recentEvents = store.Snapshot(
+var eventosRecentes = store.Snapshot(
     filter: evt => evt.Timestamp > DateTime.UtcNow.AddMinutes(-5)
 );
 
 // Snapshot por janela temporal
-var snapshot = store.Snapshot(from: start, to: end);
+var snapshot = store.Snapshot(from: inicio, to: fim);
 
 // Snapshot com filtro e janela temporal
-var filtered = store.Snapshot(
-    filter: evt => evt.Amount > 100,
-    from: start,
-    to: end
+var filtrado = store.Snapshot(
+    filter: evt => evt.Valor > 100,
+    from: inicio,
+    to: fim
 );
 ```
 
@@ -121,14 +177,13 @@ store.Statistics.AppendsPerSecond     // Taxa atual de adições
 store.Statistics.LastAppendTime       // Timestamp da última adição
 ```
 
-## Samples
+## Exemplos
 
 ### MetricsDashboard
 API web completa para coleta e consulta de métricas em tempo real:
 
 ```bash
-cd .\samples\MetricsDashboard\
-dotnet run
+cd .\samples\MetricsDashboarddotnet run
 ```
 
 Endpoints disponíveis:
@@ -156,41 +211,35 @@ O número de partições padrão é `Environment.ProcessorCount`. É possível f
 ## Performance
 Projetado para alta concorrência e baixa latência. A ordem global entre partições é aproximada.
 
-## Performance Benchmarks
+---
 
-### Value Type vs Reference Type Events
+## Benchmarks de Performance
 
-Benchmarks comparing the performance of value type events (`Event` struct) vs reference type events (`MetricEvent` class):
+### Tipos por Valor vs Tipos por Referência
 
-| Operation                 | Value Type     | Reference Type  | Improvement |
-|---------------------------|----------------|-----------------|-------------|
-| Event Addition            | 560 ms         | 797 ms          | 42% faster  |
-| Event Iteration           | 35.8 ns        | 132.5 ns        | 74% faster  |
-| Event Queries             | 393.5 ns       | 1,749.1 ns      | 77% faster  |
+| Operação                  | Tipo Valor    | Tipo Referência | Melhoria   |
+|---------------------------|---------------|-----------------|------------|
+| Adição de Evento          | 560 ms        | 797 ms          | 42% mais rápido |
+| Iteração de Eventos       | 35.8 ns       | 132.5 ns        | 74% mais rápido |
+| Consultas de Eventos      | 393.5 ns      | 1,749.1 ns      | 77% mais rápido |
 
 ### Structure of Arrays (SoA) vs Array of Structures (AoS)
 
-Benchmarks comparing memory layout approaches:
+| Operação                  | SoA           | AoS             | Melhoria   |
+|---------------------------|---------------|-----------------|------------|
+| Agregação por Chave       | 55.2 ms       | 74.6 ms         | 26% mais rápido |
+| Uso de Memória            | Menor         | Maior           | Variável   |
 
-| Operation                 | SoA            | AoS             | Improvement |
-|---------------------------|----------------|-----------------|-------------|
-| Aggregation by Key        | 55.2 ms        | 74.6 ms         | 26% faster  |
-| Memory Usage              | Lower          | Higher          | Varies      |
-
-The benchmarks confirm that:
-1. Value types provide significantly better performance than reference types for both write and read operations
-2. The Structure of Arrays (SoA) approach improves cache locality and reduces memory pressure
-3. For high-throughput scenarios, the optimized EventStoreV2 implementation is recommended
+**Conclusões:**
+1. Tipos por valor são significativamente mais rápidos que tipos por referência para leitura e escrita.
+2. SoA melhora cache locality e reduz pressão de memória.
+3. Para alto throughput, a implementação `EventStoreV2` é recomendada.
 
 ```csharp
-// Using the optimized EventStoreV2 with value types
-var store = new EventStoreV2(capacity: 1_000_000, partitions: 16);
-
-// Adding events with zero allocations
+// Usando EventStoreV2 com tipos por valor
+var store = new EventStoreV2(capacidade: 1_000_000, particoes: 16);
 store.Add("sensor1", 25.5, DateTime.UtcNow.Ticks);
-
-// Fast aggregation
-double average = store.Average("sensor1");
+double media = store.Average("sensor1");
 ```
 
 ## Limitações
@@ -199,3 +248,22 @@ double average = store.Average("sensor1");
 
 ## Licença
 MIT
+
+---
+
+## 🌐 Exemplo com múltiplos Gateways (docker-compose)
+
+Subir 1 EventStore, 3 gateways e Nginx balanceando:
+```bash
+docker compose up --build
+```
+Testar envio de pedidos (balanceado entre gateways):
+```bash
+curl -X POST http://localhost:8080/orders
+curl -X POST 'http://localhost:8080/orders/bulk?n=50'
+```
+Ver estatísticas:
+```bash
+curl http://localhost:8080/stats/local    # stats de um gateway (um dos 3)
+curl http://localhost:8080/stats/global   # consolidação global (via leitura central)
+```
