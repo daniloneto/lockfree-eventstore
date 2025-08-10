@@ -1,6 +1,6 @@
 # <img src="https://raw.githubusercontent.com/daniloneto/lockfree-eventstore/refs/heads/main/lockfreeeventstore.png" />
 [![CI](https://github.com/daniloneto/lockfree-eventstore/actions/workflows/ci.yml/badge.svg)](https://github.com/daniloneto/lockfree-eventstore/actions)
-[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.EventStore)
+[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.Event.Store)
 
 **Um banco de eventos em memória, rodando como serviço, para sincronizar e validar operações entre múltiplas instâncias com alta concorrência e sem travas.**
 
@@ -26,6 +26,19 @@ await foreach (var ev in es.Read("gateway/orders", from: 0))
 {
     /* tratar evento */
 }
+```
+
+### 🔁 Sample de Cliente
+Veja `samples/ClientSample` para um exemplo que:
+- Envia eventos em paralelo para `gateway/orders`
+- Lê os eventos de volta
+- Calcula agregações locais
+
+Para executar:
+```bash
+docker run --rm -p 7070:7070 daniloneto/lockfree-eventstore:latest
+cd samples/ClientSample
+ dotnet run
 ```
 
 ---
@@ -235,3 +248,22 @@ double media = store.Average("sensor1");
 
 ## Licença
 MIT
+
+---
+
+## 🌐 Exemplo com múltiplos Gateways (docker-compose)
+
+Subir 1 EventStore, 3 gateways e Nginx balanceando:
+```bash
+docker compose up --build
+```
+Testar envio de pedidos (balanceado entre gateways):
+```bash
+curl -X POST http://localhost:8080/orders
+curl -X POST 'http://localhost:8080/orders/bulk?n=50'
+```
+Ver estatísticas:
+```bash
+curl http://localhost:8080/stats/local    # stats de um gateway (um dos 3)
+curl http://localhost:8080/stats/global   # consolidação global (via leitura central)
+```

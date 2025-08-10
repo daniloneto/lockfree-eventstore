@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using LockFree.EventStore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -10,9 +11,73 @@ var store = new EventStore<MetricEvent>(new EventStoreOptions<MetricEvent>
     Partitions = Environment.ProcessorCount
 });
 
-// Health check endpoint
+// New: order events store used by GatewayClient sample (/streams/{stream})
+var orderStore = new EventStore<OrderEvent>(new EventStoreOptions<OrderEvent>
+{
+    TimestampSelector = new OrderTimestampSelector(),
+    CapacityPerPartition = 10_000,
+    Partitions = Environment.ProcessorCount
+});
+
+// Health check endpoint (keep single definition)
 app.MapGet("/health", () => Results.Ok("OK"));
 
+// --- Generic stream ingestion endpoints for Gateways ---
+// Append single event to a named stream
+app.MapPost("/streams/{*stream}", (string stream, GatewayOrderCreated dto) =>
+{
+    var evt = new OrderEvent(dto.Id, stream, dto.GatewayId, dto.Valor, dto.Timestamp == default ? DateTime.UtcNow : dto.Timestamp.ToUniversalTime());
+    orderStore.TryAppend(evt);
+    return Results.Accepted();
+});
+
+// Read all events of a stream (simple demo, no paging yet)
+// Aggregate per stream (optional helper used for consistency checks)
+// Re-map: /streams/{*stream}?aggregate=true
+app.MapGet("/streams/{*stream}", (string stream, long? from, bool? aggregate) =>
+{
+    if (aggregate == true)
+    {
+        var start = Stopwatch.GetTimestamp();
+        var agg = new Dictionary<string, (int Count, long Sum)>();
+        orderStore.ProcessEvents(agg, (ref Dictionary<string, (int Count, long Sum)> state, OrderEvent e, DateTime? _) =>
+        {
+            if (e.Stream == stream)
+            {
+                if (!state.TryGetValue(e.GatewayId, out var val)) val = (0, 0);
+                val.Count++;
+                val.Sum += e.Valor;
+                state[e.GatewayId] = val;
+            }
+            return true;
+        });
+        var elapsedMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        var totalCount = agg.Values.Sum(v => v.Count);
+        var totalValor = agg.Values.Sum(v => v.Sum);
+        var byGateway = agg.ToDictionary(kv => kv.Key, kv => new { kv.Value.Count, kv.Value.Sum });
+        return Results.Ok(new { stream, totalEvents = totalCount, totalValor, gateways = byGateway, durationMs = elapsedMs });
+    }
+
+    // from ignored; return raw list
+    var list = new List<GatewayOrderCreated>();
+    orderStore.ProcessEvents(list, (ref List<GatewayOrderCreated> acc, OrderEvent e, DateTime? ts) =>
+    {
+        if (e.Stream == stream)
+        {
+            acc.Add(new GatewayOrderCreated
+            {
+                Id = e.Id,
+                GatewayId = e.GatewayId,
+                Valor = e.Valor,
+                Timestamp = e.Timestamp
+            });
+        }
+        return true;
+    });
+    return Results.Ok(list);
+});
+
+// Existing metrics endpoints below
 app.MapPost("/metrics", (MetricEvent m) =>
 {
     store.TryAppend(m);
@@ -166,14 +231,15 @@ app.MapGet("/metrics/process-events", (string? label) =>
 });
 
 // Administrative endpoints (simple, unsecured – secure before production)
-app.MapPost("/admin/clear", () => { store.Clear(); return Results.Ok(new { cleared = true }); });
-app.MapPost("/admin/reset", () => { store.Reset(); return Results.Ok(new { reset = true }); });
+app.MapPost("/admin/clear", () => { store.Clear(); orderStore.Clear(); return Results.Ok(new { cleared = true }); });
+app.MapPost("/admin/reset", () => { store.Reset(); orderStore.Reset(); return Results.Ok(new { reset = true }); });
 app.MapPost("/admin/purge", (int? olderThanMinutes, DateTime? olderThan) =>
 {
     var cutoff = olderThan ?? DateTime.UtcNow.AddMinutes(-(olderThanMinutes ?? 60));
     try
     {
         store.Purge(cutoff);
+        orderStore.Purge(cutoff);
         return Results.Ok(new { purgedBefore = cutoff });
     }
     catch (InvalidOperationException ex)
@@ -183,3 +249,20 @@ app.MapPost("/admin/purge", (int? olderThanMinutes, DateTime? olderThan) =>
 });
 
 app.Run();
+
+// Move type declarations after top-level statements & mark internal to silence XML warnings for sample
+internal class GatewayOrderCreated
+{
+    public string Id { get; set; } = string.Empty;
+    public int Valor { get; set; }
+    public DateTime Timestamp { get; set; }
+    public string GatewayId { get; set; } = string.Empty;
+}
+
+internal readonly record struct OrderEvent(string Id, string Stream, string GatewayId, int Valor, DateTime Timestamp);
+
+internal readonly struct OrderTimestampSelector : IEventTimestampSelector<OrderEvent>
+{
+    public DateTime GetTimestamp(OrderEvent e) => e.Timestamp;
+    public long GetTimestampTicks(OrderEvent e) => e.Timestamp.Ticks;
+}
