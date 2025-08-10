@@ -41,6 +41,22 @@ cd samples/ClientSample
  dotnet run
 ```
 
+## 🌐 Exemplo com múltiplos Gateways (docker-compose)
+
+Subir 1 EventStore, 3 gateways e Nginx balanceando:
+```bash
+docker compose up --build
+```
+Testar envio de pedidos (balanceado entre gateways):
+```bash
+curl -X POST http://localhost:8080/orders
+curl -X POST 'http://localhost:8080/orders/bulk?n=50'
+```
+Ver estatísticas:
+```bash
+curl http://localhost:8080/stats/local    # stats de um gateway (um dos 3)
+curl http://localhost:8080/stats/global   # consolidação global (via leitura central)
+```
 ---
 
 ## 💡 Por que usar
@@ -248,22 +264,3 @@ double media = store.Average("sensor1");
 
 ## Licença
 MIT
-
----
-
-## 🌐 Exemplo com múltiplos Gateways (docker-compose)
-
-Subir 1 EventStore, 3 gateways e Nginx balanceando:
-```bash
-docker compose up --build
-```
-Testar envio de pedidos (balanceado entre gateways):
-```bash
-curl -X POST http://localhost:8080/orders
-curl -X POST 'http://localhost:8080/orders/bulk?n=50'
-```
-Ver estatísticas:
-```bash
-curl http://localhost:8080/stats/local    # stats de um gateway (um dos 3)
-curl http://localhost:8080/stats/global   # consolidação global (via leitura central)
-```
