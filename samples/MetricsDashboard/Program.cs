@@ -165,4 +165,21 @@ app.MapGet("/metrics/process-events", (string? label) =>
     });
 });
 
+// Administrative endpoints (simple, unsecured – secure before production)
+app.MapPost("/admin/clear", () => { store.Clear(); return Results.Ok(new { cleared = true }); });
+app.MapPost("/admin/reset", () => { store.Reset(); return Results.Ok(new { reset = true }); });
+app.MapPost("/admin/purge", (int? olderThanMinutes, DateTime? olderThan) =>
+{
+    var cutoff = olderThan ?? DateTime.UtcNow.AddMinutes(-(olderThanMinutes ?? 60));
+    try
+    {
+        store.Purge(cutoff);
+        return Results.Ok(new { purgedBefore = cutoff });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+});
+
 app.Run();
