@@ -1417,27 +1417,16 @@ public sealed class EventStore<TEvent>
     private void ProcessStandardPartitionSnapshot(int index, Action<ReadOnlySpan<TEvent>> processor, int chunkSize)
     {
         var partition = _partitions![index];
-        if (partition is LockFreeRingBuffer<TEvent> typed)
+        if (partition == null)
+            throw new InvalidOperationException("Partition is not initialized.");
+
+        // Directly use the standard ring buffer's zero-allocation snapshot path.
+        var pool = ArrayPool<TEvent>.Shared;
+        partition.SnapshotZeroAlloc<TEvent>(span =>
         {
-            var pool = ArrayPool<TEvent>.Shared;
-            typed.SnapshotZeroAlloc<TEvent>(span =>
-            {
-                IncrementSnapshotBytesExposed((long)span.Length * sizeof(long));
-                processor(span);
-            }, pool, chunkSize);
-        }
-        else
-        {
-            var temp = new TEvent[partition.Capacity];
-            var len = partition.Snapshot(temp);
-            for (int j = 0; j < len; j += chunkSize)
-            {
-                var chunkLen = Math.Min(chunkSize, len - j);
-                var chunk = temp.AsSpan(j, chunkLen);
-                IncrementSnapshotBytesExposed((long)chunkLen * sizeof(long));
-                processor(chunk);
-            }
-        }
+            IncrementSnapshotBytesExposed((long)span.Length * sizeof(long));
+            processor(span);
+        }, pool, chunkSize);
     }
 
     /// <summary>
