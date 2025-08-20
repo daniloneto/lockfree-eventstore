@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Threading;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Linq;
 
 namespace LockFree.EventStore;
 
@@ -108,13 +109,8 @@ public sealed class EventStore<TEvent>
     {
         get
         {
-            int total = 0;
             var partitionCount = GetPartitionCount();
-            for (int i = 0; i < partitionCount; i++)
-            {
-                total += GetPartitionCapacity(i);
-            }
-            return total;
+            return Enumerable.Range(0, partitionCount).Sum(i => GetPartitionCapacity(i));
         }
     }
 
@@ -125,13 +121,10 @@ public sealed class EventStore<TEvent>
     {
         get
         {
-            long total = 0;
             var partitionCount = GetPartitionCount();
-            for (int i = 0; i < partitionCount; i++)
-            {
-                total += GetPartitionCount(i);
-            }
-            return total;
+            return Enumerable.Range(0, partitionCount)
+                .Select(i => GetPartitionCount(i))
+                .Sum();
         }
     }
 
@@ -148,11 +141,7 @@ public sealed class EventStore<TEvent>
         get
         {
             var partitionCount = GetPartitionCount();
-            for (int i = 0; i < partitionCount; i++)
-            {
-                if (!IsPartitionEmpty(i)) return false;
-            }
-            return true;
+            return Enumerable.Range(0, partitionCount).All(i => IsPartitionEmpty(i));
         }
     }
 
@@ -164,11 +153,7 @@ public sealed class EventStore<TEvent>
         get
         {
             var partitionCount = GetPartitionCount();
-            for (int i = 0; i < partitionCount; i++)
-            {
-                if (IsPartitionFull(i)) return true;
-            }
-            return false;
+            return Enumerable.Range(0, partitionCount).Any(i => IsPartitionFull(i));
         }
     }
 
@@ -278,14 +263,19 @@ public sealed class EventStore<TEvent>
         
         if (IsFull)
             _options.OnCapacityReached?.Invoke();
-    }/// <summary>
+    }
+
+    /// <summary>
     /// Appends an event using the default partitioner.
-    /// </summary>    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryAppend(TEvent e)
     {
         var partition = Partitioners.ForKey(e, GetPartitionCount());
         return TryAppend(e, partition);
-    }/// <summary>
+    }
+
+    /// <summary>
     /// Appends a batch of events using the default partitioner.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -298,20 +288,6 @@ public sealed class EventStore<TEvent>
                 written++;
         }
         return written;
-    }
-
-    /// <summary>
-    /// Appends a batch of events using the default partitioner with early termination on failure.
-    /// This version stops at the first failed append and returns the count of successful appends.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public int TryAppendAll(ReadOnlySpan<TEvent> batch)
-    {
-        for (int i = 0; i < batch.Length; i++)
-        {
-            if (!TryAppend(batch[i]))
-                return i; // Return count of successful appends before failure
-        }        return batch.Length; // All succeeded
     }
 
     /// <summary>
@@ -339,15 +315,6 @@ public sealed class EventStore<TEvent>
         return result;
     }
 
-    // ========== KEY ID HOT PATH METHODS ==========
-
-    /// <summary>
-    /// Gets or creates a KeyId for the given string key.
-    /// This is the bridge method between string keys and the hot path.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public KeyId GetOrCreateKeyId(string key) => _keyMap.GetOrAdd(key);
-
     /// <summary>
     /// Appends an event using a string key (converts to KeyId internally).
     /// This maintains the existing API while benefiting from KeyId optimization.
@@ -373,7 +340,8 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// HOT PATH: Appends an event using KeyId directly (no string operations).
     /// This is the fastest path for repeated operations with the same keys.
-    /// </summary>    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryAppend(KeyId keyId, TEvent value)
     {
         var partition = Partitioners.ForKeyIdSimple(keyId, GetPartitionCount());
@@ -383,7 +351,8 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// HOT PATH: Appends an event using KeyId with timestamp (no string operations).
     /// This is the fastest path for repeated operations with the same keys.
-    /// </summary>    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryAppend(KeyId keyId, TEvent value, long timestamp)
     {
         var partition = Partitioners.ForKeyIdSimple(keyId, GetPartitionCount());
@@ -391,9 +360,34 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
+    /// Appends a batch of events using the default partitioner with early termination on failure.
+    /// This version stops at the first failed append and returns the count of successful appends.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int TryAppendAll(ReadOnlySpan<TEvent> batch)
+    {
+        for (int i = 0; i < batch.Length; i++)
+        {
+            if (!TryAppend(batch[i]))
+                return i; // Return count of successful appends before failure
+        }
+        return batch.Length; // All succeeded
+    }
+
+    // ========== KEY ID HOT PATH METHODS ==========
+
+    /// <summary>
+    /// Gets or creates a KeyId for the given string key.
+    /// This is the bridge method between string keys and the hot path.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public KeyId GetOrCreateKeyId(string key) => _keyMap.GetOrAdd(key);
+
+    /// <summary>
     /// HOT PATH: Batch append using KeyId array (no string operations).
     /// All events use the same KeyId for maximum performance.
-    /// </summary>    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int TryAppendBatch(KeyId keyId, ReadOnlySpan<TEvent> batch)
     {
         var partition = Partitioners.ForKeyIdSimple(keyId, GetPartitionCount());
@@ -419,7 +413,7 @@ public sealed class EventStore<TEvent>
     public void Clear()
     {
         var partitionCount = GetPartitionCount();
-        for (int i = 0; i < partitionCount; i++)
+        foreach (var i in Enumerable.Range(0, partitionCount))
         {
             ClearPartition(i);
         }
@@ -452,109 +446,138 @@ public sealed class EventStore<TEvent>
             throw new InvalidOperationException("TimestampSelector must be configured to use Purge.");
 
         var pool = ArrayPool<TEvent>.Shared;
-        var tempBuffer = pool.Rent(16384); // Start with reasonable size
-        var keepCount = 0;
-        
+        var tempBuffer = pool.Rent(16384);
         try
         {
-            // Collect events to keep using chunked processing
-            SnapshotZeroAlloc(events =>
-            {
-                foreach (var evt in events)
-                {
-                    if (_ts.GetTimestamp(evt) >= olderThan)
-                    {
-                        // Expand buffer if needed
-                        if (keepCount >= tempBuffer.Length)
-                        {
-                            var oldBuffer = tempBuffer;
-                            var newBuffer = pool.Rent(tempBuffer.Length * 2);
-                            oldBuffer.AsSpan(0, keepCount).CopyTo(newBuffer);
-                            pool.Return(oldBuffer);
-                            tempBuffer = newBuffer;
-                        }
-                        
-                        tempBuffer[keepCount++] = evt;
-                    }
-                }
-            });            // Clear the store
-            var partitionCount = GetPartitionCount();
-            for (int p = 0; p < partitionCount; p++)
-            {
-                ClearPartition(p);
-            }
-
-            // Re-add the events we want to keep
-            for (int i = 0; i < keepCount; i++)
-            {
-                var evt = tempBuffer[i];
-                var partition = Partitioners.ForKey(evt, GetPartitionCount());
-                TryEnqueueToPartition(partition, evt);
-            }
+            var result = CollectEventsToKeep(olderThan, pool, tempBuffer);
+            ClearAllPartitions();
+            ReAddKeptEvents(result.buffer, result.count);
         }
         finally
         {
             pool.Return(tempBuffer, clearArray: false);
         }
-    }/// <summary>    /// Takes a snapshot of all partitions and returns an immutable list.
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private (int count, TEvent[] buffer) CollectEventsToKeep(DateTime olderThan, ArrayPool<TEvent> pool, TEvent[] initialBuffer)
+    {
+        int keepCount = 0;
+        var buffer = initialBuffer;
+        SnapshotZeroAlloc(events =>
+        {
+            foreach (var evt in events)
+            {
+                if (_ts!.GetTimestamp(evt) >= olderThan)
+                {
+                    buffer = EnsureCapacity(buffer, keepCount + 1, pool);
+                    buffer[keepCount++] = evt;
+                }
+            }
+        });
+        return (keepCount, buffer);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TEvent[] EnsureCapacity(TEvent[] buffer, int needed, ArrayPool<TEvent> pool)
+    {
+        if (needed <= buffer.Length) return buffer;
+        var old = buffer;
+        var newBuf = pool.Rent(Math.Max(old.Length * 2, needed));
+        Array.Copy(old, 0, newBuf, 0, old.Length);
+        pool.Return(old);
+        return newBuf;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ClearAllPartitions()
+    {
+        var partitionCount = GetPartitionCount();
+        foreach (var p in Enumerable.Range(0, partitionCount))
+        {
+            ClearPartition(p);
+        }
+        _statistics.Reset();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ReAddKeptEvents(TEvent[] buffer, int count)
+    {
+        var partitionCount = GetPartitionCount();
+        for (int i = 0; i < count; i++)
+        {
+            var evt = buffer[i];
+            var partition = Partitioners.ForKey(evt, partitionCount);
+            TryEnqueueToPartition(partition, evt);
+        }
+    }
+
+    /// <summary>
+    /// Takes a snapshot of all partitions and returns an immutable list.
     /// Uses pooled buffers for temporary storage to reduce allocations.
     /// </summary>
     public IReadOnlyList<TEvent> Snapshot()
     {
-        // First pass: calculate total count
-        long total = 0;
         var partitionCount = GetPartitionCount();
         var partitionLengths = Buffers.RentInts(partitionCount);
-        
         try
         {
-            for (int i = 0; i < partitionCount; i++)
-            {
-                var len = GetPartitionCount(i);
-                partitionLengths[i] = (int)Math.Min(len, GetPartitionCapacity(i));
-                total += partitionLengths[i];
-            }            
-            // Allocate final result array
+            long total = ComputePartitionLengths(partitionCount, partitionLengths);
             var result = new TEvent[total];
-            int idx = 0;
-            
-            // Second pass: populate result using pooled temporary buffers
-            for (int i = 0; i < partitionCount; i++)
-            {
-                var expectedLen = partitionLengths[i];
-                if (expectedLen > 0)
-                {
-                    var capacity = GetPartitionCapacity(i);
-                    var tempBuffer = new TEvent[capacity];
-                    var actualLen = _usePadding ? 
-                        _paddedPartitions![i].Snapshot(tempBuffer) :
-                        _partitions![i].Snapshot(tempBuffer);
-                    tempBuffer.AsSpan(0, actualLen).CopyTo(result.AsSpan(idx));
-                    idx += actualLen;
-                }
-            }            
-            // Trim result array if needed
-            if (idx < result.Length)
-            {
-                var trimmed = new TEvent[idx];
-                result.AsSpan(0, idx).CopyTo(trimmed);
-                  // Track snapshot bytes exposed (approximate size calculation)
-                var bytesExposed = (long)idx * sizeof(long); // Conservative estimate
-                IncrementSnapshotBytesExposed(bytesExposed);
-                
-                return trimmed;
-            }
-            else
-            {                // Track snapshot bytes exposed for full result (approximate size calculation)
-                var totalBytesExposed = (long)result.Length * sizeof(long); // Conservative estimate
-                IncrementSnapshotBytesExposed(totalBytesExposed);
-                
-                return result;
-            }
+            int idx = CopyPartitionsToResult(partitionCount, partitionLengths, result);
+            return FinalizeSnapshotResult(result, idx);
         }
         finally
         {
             Buffers.ReturnInts(partitionLengths);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private long ComputePartitionLengths(int partitionCount, int[] partitionLengths)
+    {
+        long total = 0;
+        for (int i = 0; i < partitionCount; i++)
+        {
+            var len = GetPartitionCount(i);
+            partitionLengths[i] = (int)Math.Min(len, GetPartitionCapacity(i));
+            total += partitionLengths[i];
+        }
+        return total;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int CopyPartitionsToResult(int partitionCount, int[] partitionLengths, TEvent[] result)
+    {
+        int idx = 0;
+        for (int i = 0; i < partitionCount; i++)
+        {
+            var expectedLen = partitionLengths[i];
+            if (expectedLen <= 0) continue;
+
+            var capacity = GetPartitionCapacity(i);
+            var tempBuffer = new TEvent[capacity];
+            var actualLen = _usePadding ? _paddedPartitions![i].Snapshot(tempBuffer) : _partitions![i].Snapshot(tempBuffer);
+            tempBuffer.AsSpan(0, actualLen).CopyTo(result.AsSpan(idx));
+            idx += actualLen;
+        }
+        return idx;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private IReadOnlyList<TEvent> FinalizeSnapshotResult(TEvent[] result, int idx)
+    {
+        if (idx < result.Length)
+        {
+            var trimmed = new TEvent[idx];
+            result.AsSpan(0, idx).CopyTo(trimmed);
+            IncrementSnapshotBytesExposed((long)idx * sizeof(long));
+            return trimmed;
+        }
+        else
+        {
+            IncrementSnapshotBytesExposed((long)result.Length * sizeof(long));
+            return result;
         }
     }    /// <summary>
     /// Creates zero-allocation views of all partition contents.
@@ -564,12 +587,9 @@ public sealed class EventStore<TEvent>
     public IReadOnlyList<PartitionView<TEvent>> SnapshotViews()
     {
         var partitionCount = GetPartitionCount();
-        var views = new PartitionView<TEvent>[partitionCount];
-        
-        for (int i = 0; i < partitionCount; i++)
-        {
-            views[i] = CreatePartitionView(i);
-        }
+        var views = Enumerable.Range(0, partitionCount)
+            .Select(i => CreatePartitionView(i))
+            .ToArray();
         
         return views;
     }    /// <summary>
@@ -586,22 +606,11 @@ public sealed class EventStore<TEvent>
         var toTicks = to?.Ticks ?? long.MaxValue;
         
         var partitionCount = GetPartitionCount();
-        var views = new PartitionView<TEvent>[partitionCount];
-        
-        for (int i = 0; i < partitionCount; i++)
-        {
-            views[i] = CreatePartitionViewFiltered(i, fromTicks, toTicks, _ts);
-        }
+        var views = Enumerable.Range(0, partitionCount)
+            .Select(i => CreatePartitionViewFiltered(i, fromTicks, toTicks, _ts))
+            .ToArray();
         
         return views;
-    }
-
-    /// <summary>
-    /// Takes a filtered snapshot based on the provided predicate.
-    /// </summary>
-    public IReadOnlyList<TEvent> Snapshot(Func<TEvent, bool> filter)
-    {
-        return Query(filter).ToList();
     }
 
     /// <summary>
@@ -615,33 +624,28 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Takes a filtered snapshot within the specified time window.
     /// </summary>
-    public IReadOnlyList<TEvent> Snapshot(Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    public IReadOnlyList<TEvent> Snapshot(Func<TEvent, bool> filter, DateTime? from, DateTime? to)
     {
         return Query(filter, from, to).ToList();
-    }    /// <summary>
+    }
+
+    /// <summary>
+    /// Takes a filtered snapshot across the entire time range.
+    /// </summary>
+    public IReadOnlyList<TEvent> Snapshot(Func<TEvent, bool> filter)
+    {
+        return Query(new Predicate<TEvent>(filter), null, null).ToList();
+    }
+
+    /// <summary>
     /// Returns an enumerable snapshot of all events.
     /// Uses iterator pattern to avoid upfront allocations.
     /// </summary>
     public IEnumerable<TEvent> EnumerateSnapshot()
     {
         var partitionCount = GetPartitionCount();
-        for (int i = 0; i < partitionCount; i++)
-        {
-            if (_usePadding)
-            {
-                foreach (var e in _paddedPartitions![i].EnumerateSnapshot())
-                {
-                    yield return e;
-                }
-            }
-            else
-            {
-                foreach (var e in _partitions![i].EnumerateSnapshot())
-                {
-                    yield return e;
-                }
-            }
-        }
+        return Enumerable.Range(0, partitionCount)
+            .SelectMany(i => EnumeratePartitionSnapshot(i));
     }
 
     private bool WithinWindow(TEvent e, DateTime? from, DateTime? to)
@@ -661,38 +665,28 @@ public sealed class EventStore<TEvent>
     public IEnumerable<TEvent> Query(Predicate<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
     {
         var partitionCount = GetPartitionCount();
-        for (int i = 0; i < partitionCount; i++)
-        {
-            if (_usePadding)
-            {
-                foreach (var e in _paddedPartitions![i].EnumerateSnapshot())
-                {
-                    if (!WithinWindow(e, from, to))
-                        continue;
-                    if (filter is null || filter(e))
-                        yield return e;
-                }
-            }
-            else
-            {
-                foreach (var e in _partitions![i].EnumerateSnapshot())
-                {
-                    if (!WithinWindow(e, from, to))
-                        continue;
-                    if (filter is null || filter(e))
-                        yield return e;
-                }
-            }
-        }
+        return Enumerable.Range(0, partitionCount)
+            .SelectMany(i => EnumeratePartitionSnapshot(i))
+            .Where(e => WithinWindow(e, from, to) && (filter is null || filter(e)));
     }
 
     /// <summary>
     /// Queries events by filter function and time window.
     /// </summary>
-    public IEnumerable<TEvent> Query(Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    public IEnumerable<TEvent> Query(Func<TEvent, bool> filter, DateTime? from, DateTime? to)
     {
         return Query(filter != null ? new Predicate<TEvent>(filter) : null, from, to);
-    }    /// <summary>
+    }
+
+    /// <summary>
+    /// Queries events by filter function for the entire time range.
+    /// </summary>
+    public IEnumerable<TEvent> Query(Func<TEvent, bool> filter)
+    {
+        return Query(new Predicate<TEvent>(filter), null, null);
+    }
+
+    /// <summary>
     /// Counts events within the specified time window.
     /// </summary>
     public long CountEvents(DateTime? from = null, DateTime? to = null)
@@ -703,9 +697,17 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Counts events matching the filter within the specified time window.
     /// </summary>
-    public long CountEvents(Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    public long CountEvents(Func<TEvent, bool> filter, DateTime? from, DateTime? to)
     {
         return Query(filter, from, to).LongCount();
+    }
+
+    /// <summary>
+    /// Counts events matching the filter across the entire time range.
+    /// </summary>
+    public long CountEvents(Func<TEvent, bool> filter)
+    {
+        return Query(new Predicate<TEvent>(filter), null, null).LongCount();
     }
 
     /// <summary>
@@ -725,7 +727,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Sums values extracted from filtered events within the specified time window.
     /// </summary>
-    public TResult Sum<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    public TResult Sum<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter, DateTime? from, DateTime? to)
         where TResult : struct, INumber<TResult>
     {
         var sum = TResult.Zero;
@@ -734,6 +736,15 @@ public sealed class EventStore<TEvent>
             sum += selector(evt);
         }
         return sum;
+    }
+
+    /// <summary>
+    /// Sums values extracted from filtered events across the entire time range.
+    /// </summary>
+    public TResult Sum<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter)
+        where TResult : struct, INumber<TResult>
+    {
+        return Sum(selector, filter, null, null);
     }
 
     /// <summary>
@@ -755,7 +766,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Calculates the average of values extracted from filtered events within the specified time window.
     /// </summary>
-    public double Average<TValue>(Func<TEvent, TValue> selector, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    public double Average<TValue>(Func<TEvent, TValue> selector, Func<TEvent, bool> filter, DateTime? from, DateTime? to)
         where TValue : struct, INumber<TValue>
     {
         var sum = TValue.Zero;
@@ -766,6 +777,15 @@ public sealed class EventStore<TEvent>
             count++;
         }
         return count == 0 ? 0.0 : Convert.ToDouble(sum) / count;
+    }
+
+    /// <summary>
+    /// Calculates the average of values extracted from filtered events across the entire time range.
+    /// </summary>
+    public double Average<TValue>(Func<TEvent, TValue> selector, Func<TEvent, bool> filter)
+        where TValue : struct, INumber<TValue>
+    {
+        return Average(selector, filter, null, null);
     }
 
     /// <summary>
@@ -787,7 +807,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Finds the minimum value extracted from filtered events within the specified time window.
     /// </summary>
-    public TResult? Min<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    public TResult? Min<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter, DateTime? from, DateTime? to)
         where TResult : struct, IComparable<TResult>
     {
         TResult? min = null;
@@ -798,6 +818,15 @@ public sealed class EventStore<TEvent>
                 min = value;
         }
         return min;
+    }
+
+    /// <summary>
+    /// Finds the minimum value extracted from filtered events across the entire time range.
+    /// </summary>
+    public TResult? Min<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter)
+        where TResult : struct, IComparable<TResult>
+    {
+        return Min(selector, filter, null, null);
     }
 
     /// <summary>
@@ -819,7 +848,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Finds the maximum value extracted from filtered events within the specified time window.
     /// </summary>
-    public TResult? Max<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    public TResult? Max<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter, DateTime? from, DateTime? to)
         where TResult : struct, IComparable<TResult>
     {
         TResult? max = null;
@@ -830,6 +859,15 @@ public sealed class EventStore<TEvent>
                 max = value;
         }
         return max;
+    }
+
+    /// <summary>
+    /// Finds the maximum value extracted from filtered events across the entire time range.
+    /// </summary>
+    public TResult? Max<TResult>(Func<TEvent, TResult> selector, Func<TEvent, bool> filter)
+        where TResult : struct, IComparable<TResult>
+    {
+        return Max(selector, filter, null, null);
     }    /// <summary>
     /// Aggregates all events using the specified fold function.
     /// </summary>
@@ -846,9 +884,17 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Aggregates events using the specified fold function with a filter function.
     /// </summary>
-    public TAcc Aggregate<TAcc>(Func<TAcc> seed, Func<TAcc, TEvent, TAcc> fold, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    public TAcc Aggregate<TAcc>(Func<TAcc> seed, Func<TAcc, TEvent, TAcc> fold, Func<TEvent, bool> filter, DateTime? from, DateTime? to)
     {
         return Aggregate(seed, fold, filter != null ? new Predicate<TEvent>(filter) : null, from, to);
+    }
+
+    /// <summary>
+    /// Aggregates events using the specified fold function with a filter function for the entire time range.
+    /// </summary>
+    public TAcc Aggregate<TAcc>(Func<TAcc> seed, Func<TAcc, TEvent, TAcc> fold, Func<TEvent, bool> filter)
+    {
+        return Aggregate(seed, fold, new Predicate<TEvent>(filter), null, null);
     }
 
     /// <summary>
@@ -878,6 +924,15 @@ public sealed class EventStore<TEvent>
         where TKey : notnull
     {
         return AggregateBy(groupBy, seed, fold, filter != null ? new Predicate<TEvent>(filter) : null, from, to);
+    }
+
+    /// <summary>
+    /// Aggregates events grouped by a key with a filter function across the entire time range.
+    /// </summary>
+    public Dictionary<TKey, TAcc> AggregateBy<TKey, TAcc>(Func<TEvent, TKey> groupBy, Func<TAcc> seed, Func<TAcc, TEvent, TAcc> fold, Func<TEvent, bool> filter)
+        where TKey : notnull
+    {
+        return AggregateBy(groupBy, seed, fold, new Predicate<TEvent>(filter), null, null);
     }    /// <summary>
     /// Performs window aggregation across all partitions without materializing intermediate collections.
     /// Uses incremental aggregation to avoid scanning all events on each call.
@@ -887,261 +942,32 @@ public sealed class EventStore<TEvent>
     {
         var globalResult = new WindowAggregateState();
         var partitionCount = GetPartitionCount();
-        
         for (int i = 0; i < partitionCount; i++)
         {
-            ref var windowState = ref _windowStates[i];
-            
-            // For now, use simplified aggregation without incremental state
-            // TODO: Implement incremental window aggregation for padded partitions
-            if (_usePadding)
-            {
-                var partition = _paddedPartitions![i];
-                var partitionState = new WindowAggregateState();
-                
-                // Simple enumeration for padded partitions
-                foreach (var item in partition.EnumerateSnapshot())
-                {
-                    if (_ts != null)
-                    {
-                        var itemTicks = _ts.GetTimestamp(item).Ticks;
-                        if (itemTicks >= fromTicks && itemTicks <= toTicks)
-                        {
-                            if (filter?.Invoke(item) != false)
-                            {
-                                partitionState.Count++;
-                                // Extract numeric value for aggregation
-                                if (TryExtractNumericValue(item, out double value))
-                                {
-                                    partitionState.Sum += value;
-                                    if (partitionState.Count == 1) // First item
-                                    {
-                                        partitionState.Min = value;
-                                        partitionState.Max = value;
-                                    }
-                                    else
-                                    {
-                                        if (value < partitionState.Min) partitionState.Min = value;
-                                        if (value > partitionState.Max) partitionState.Max = value;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                globalResult.Merge(partitionState);
-            }
-            else
-            {
-                var partition = _partitions![i];
-                
-                // Simplified implementation without window advancement
-                // TODO: Restore full window aggregation functionality
-                var partitionState = new WindowAggregateState();
-                
-                // Simple enumeration for now
-                foreach (var item in partition.EnumerateSnapshot())
-                {
-                    if (_ts != null)
-                    {
-                        var itemTicks = _ts.GetTimestamp(item).Ticks;
-                        if (itemTicks >= fromTicks && itemTicks <= toTicks)
-                        {
-                            if (filter?.Invoke(item) != false)
-                            {
-                                partitionState.Count++;
-                                // Extract numeric value for aggregation
-                                if (TryExtractNumericValue(item, out double value))
-                                {
-                                    partitionState.Sum += value;
-                                    if (partitionState.Count == 1) // First item
-                                    {
-                                        partitionState.Min = value;
-                                        partitionState.Max = value;
-                                    }
-                                    else
-                                    {
-                                        if (value < partitionState.Min) partitionState.Min = value;
-                                        if (value > partitionState.Max) partitionState.Max = value;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Merge partition result into global result
-                globalResult.Merge(partitionState);
-            }
+            var partitionState = AggregateWindowForPartition(i, fromTicks, toTicks, filter);
+            globalResult.Merge(partitionState);
         }
-        
         return globalResult.ToResult();
-    }/// <summary>
-    /// Overload that accepts DateTime parameters for convenience.
-    /// </summary>
-    public WindowAggregateResult AggregateWindow(DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
-    {
-        var fromTicks = from?.Ticks ?? long.MinValue;
-        var toTicks = to?.Ticks ?? long.MaxValue;
-        return AggregateWindow(fromTicks, toTicks, filter);
-    }    /// <summary>
-    /// Enhanced Sum method using incremental window aggregation for better performance.
-    /// </summary>
-    public TResult SumWindow<TResult>(Func<TEvent, TResult> selector, DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
-        where TResult : struct, INumber<TResult>
-    {
-        var sum = TResult.Zero;
-        var fromTicks = from?.Ticks ?? 0;
-        var toTicks = to?.Ticks ?? DateTime.MaxValue.Ticks;
-        var partitionCount = GetPartitionCount();
-        
-        for (int i = 0; i < partitionCount; i++)
-        {
-            ref var windowState = ref _windowStates[i];
-            
-            if (_usePadding)
-            {
-                // Simplified implementation for padded partitions
-                var partition = _paddedPartitions![i];
-                foreach (var item in partition.EnumerateSnapshot())
-                {
-                    if (_ts != null)
-                    {
-                        var itemTicks = _ts.GetTimestamp(item).Ticks;
-                        if (itemTicks >= fromTicks && itemTicks <= toTicks)
-                        {
-                            if (filter?.Invoke(item) != false)
-                            {
-                                sum += selector(item);
-                            }
-                        }
-                    }
-                }
-            }            else
-            {
-                var partition = _partitions![i];
-                
-                // Simplified implementation without window advancement
-                // TODO: Restore full window aggregation functionality
-                foreach (var item in partition.EnumerateSnapshot())
-                {
-                    if (_ts != null)
-                    {
-                        var itemTicks = _ts.GetTimestamp(item).Ticks;
-                        if (itemTicks >= fromTicks && itemTicks <= toTicks)
-                        {
-                            if (filter?.Invoke(item) != false)
-                            {
-                                sum += selector(item);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        return sum;
-    }    /// <summary>
-    /// Advances the window for a partition based on current timestamp and fixed window size.
-    /// Removes events older than (currentTimestamp - WindowSizeTicks) from the window state.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]    private void AdvancePartitionWindow(ref PartitionWindowState state, long currentTimestamp)
-    {
-        if (_ts == null) return;
-        
-        var windowSizeTicks = _options.WindowSizeTicks ?? TimeSpan.FromMinutes(5).Ticks;
-        var windowStartTicks = currentTimestamp - windowSizeTicks;
-        
-        // Capture old window boundaries before updating
-        var oldWindowStartTicks = state.WindowStartTicks;
-        var oldWindowEndTicks = state.WindowEndTicks;
-        
-        // Update window boundaries
-        state.WindowStartTicks = windowStartTicks;
-        state.WindowEndTicks = currentTimestamp;
-          // For simplified implementation, we'll recalculate the window state
-        // TODO: Implement proper incremental window advancement
-        var tempState = state; // Copy to avoid ref issues in lambda
-        
-        // Reset aggregates before recalculation
-        tempState.Count = 0;
-        tempState.Sum = 0.0;
-        tempState.Min = double.MaxValue;
-        tempState.Max = double.MinValue;
-        
-        // Recalculate window state by scanning current events
-        var partitionCount = GetPartitionCount();
-        for (int p = 0; p < partitionCount; p++)
-        {
-            if (_usePadding)
-            {
-                // For padded partitions, enumerate and filter by timestamp
-                var partition = _paddedPartitions![p];
-                foreach (var item in partition.EnumerateSnapshot())
-                {
-                    if (_ts != null)
-                    {
-                        var itemTicks = _ts.GetTimestamp(item).Ticks;
-                        if (itemTicks >= windowStartTicks && itemTicks <= currentTimestamp)
-                        {
-                            if (TryExtractNumericValue(item, out double value))
-                            {
-                                tempState.AddValue(value);
-                            }
-                        }
-                    }
-                }
-            }
-            else
-            {
-                // For standard partitions, do the same
-                var partition = _partitions![p];
-                foreach (var item in partition.EnumerateSnapshot())
-                {
-                    if (_ts != null)
-                    {
-                        var itemTicks = _ts.GetTimestamp(item).Ticks;
-                        if (itemTicks >= windowStartTicks && itemTicks <= currentTimestamp)
-                        {
-                            if (TryExtractNumericValue(item, out double value))
-                            {
-                                tempState.AddValue(value);
-                            }
-                        }
-                    }
-                }
-            }
-        }          // Update the original state
-        state = tempState;
-        // Increment window advance counter when boundaries actually change
-        if (oldWindowStartTicks != windowStartTicks || oldWindowEndTicks != currentTimestamp)
-        {
-            IncrementWindowAdvanceCount();
-        }
     }
 
-    /// <summary>
-    /// Checks if an event is within the current window based on timestamp.
-    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool IsEventInWindow(Event evt, long nowTicks)
+    private WindowAggregateState AggregateWindowForPartition(int index, long fromTicks, long toTicks, Predicate<TEvent>? filter)
     {
-        var windowSizeTicks = _options.WindowSizeTicks ?? TimeSpan.FromMinutes(5).Ticks;
-        var windowStartTicks = nowTicks - windowSizeTicks;
-        return evt.TimestampTicks >= windowStartTicks && evt.TimestampTicks <= nowTicks;
-    }
-
-    // Original methods that need to be preserved
-    private WindowItemCallback<TEvent, WindowAggregateState> CreateCallback()
-    {
-        return (ref WindowAggregateState state, TEvent item, long ticks) =>
+        var state = new WindowAggregateState();
+        foreach (var item in EnumeratePartitionSnapshot(index).Where(item =>
+        {
+            if (_ts == null) return false;
+            var itemTicks = _ts.GetTimestamp(item).Ticks;
+            if (itemTicks < fromTicks || itemTicks > toTicks) return false;
+            if (filter?.Invoke(item) == false) return false;
+            return true;
+        }))
         {
             state.Count++;
-            // Try to extract numeric value for Sum/Min/Max calculations
             if (TryExtractNumericValue(item, out double value))
             {
                 state.Sum += value;
-                if (state.Count == 1) // First item
+                if (state.Count == 1)
                 {
                     state.Min = value;
                     state.Max = value;
@@ -1152,34 +978,112 @@ public sealed class EventStore<TEvent>
                     if (value > state.Max) state.Max = value;
                 }
             }
-        };
+        }
+        return state;
+    }
+
+    /// <summary>
+    /// Overload that accepts DateTime parameters for convenience.
+    /// </summary>
+    public WindowAggregateResult AggregateWindow(DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
+    {
+        var fromTicks = from?.Ticks ?? long.MinValue;
+        var toTicks = to?.Ticks ?? long.MaxValue;
+        return AggregateWindow(fromTicks, toTicks, filter);
+    }
+
+    /// <summary>
+    /// Enhanced Sum method using incremental window aggregation for better performance.
+    /// </summary>
+    public TResult SumWindow<TResult>(Func<TEvent, TResult> selector, DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
+        where TResult : struct, INumber<TResult>
+    {
+        var sum = TResult.Zero;
+        var fromTicks = from?.Ticks ?? 0;
+        var toTicks = to?.Ticks ?? DateTime.MaxValue.Ticks;
+        var partitionCount = GetPartitionCount();
+
+        for (int i = 0; i < partitionCount; i++)
+        {
+            sum += SumWindowForPartition(i, selector, fromTicks, toTicks, filter);
+        }
+
+        return sum;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private WindowItemCallback<TEvent, WindowAggregateState> CreateFilteredCallback(Predicate<TEvent> filter)
+    private TResult SumWindowForPartition<TResult>(int index, Func<TEvent, TResult> selector, long fromTicks, long toTicks, Predicate<TEvent>? filter)
+        where TResult : struct, INumber<TResult>
     {
-        return (ref WindowAggregateState state, TEvent item, long ticks) =>
+        var sum = TResult.Zero;
+        foreach (var item in EnumeratePartitionSnapshot(index).Where(item =>
         {
-            if (filter(item))
+            if (_ts == null) return false;
+            var itemTicks = _ts.GetTimestamp(item).Ticks;
+            if (itemTicks < fromTicks || itemTicks > toTicks) return false;
+            return filter?.Invoke(item) != false;
+        }))
+        {
+            sum += selector(item);
+        }
+        return sum;
+    }
+
+    /// <summary>
+    /// Advances the window for a partition based on current timestamp and fixed window size.
+    /// Removes events older than (currentTimestamp - WindowSizeTicks) from the window state.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void AdvancePartitionWindow(ref PartitionWindowState state, long currentTimestamp)
+    {
+        if (_ts == null) return;
+
+        var windowSizeTicks = _options.WindowSizeTicks ?? TimeSpan.FromMinutes(5).Ticks;
+        var windowStartTicks = currentTimestamp - windowSizeTicks;
+
+        var oldWindowStartTicks = state.WindowStartTicks;
+        var oldWindowEndTicks = state.WindowEndTicks;
+
+        state.WindowStartTicks = windowStartTicks;
+        state.WindowEndTicks = currentTimestamp;
+
+        var tempState = state;
+        tempState.Count = 0;
+        tempState.Sum = 0.0;
+        tempState.Min = double.MaxValue;
+        tempState.Max = double.MinValue;
+
+        var partitionCount = GetPartitionCount();
+        for (int p = 0; p < partitionCount; p++)
+        {
+            ForEachEventInRange(p, windowStartTicks, currentTimestamp, item =>
             {
-                state.Count++;
-                // Try to extract numeric value for Sum/Min/Max calculations
                 if (TryExtractNumericValue(item, out double value))
                 {
-                    state.Sum += value;
-                    if (state.Count == 1) // First item after filtering
-                    {
-                        state.Min = value;
-                        state.Max = value;
-                    }
-                    else
-                    {
-                        if (value < state.Min) state.Min = value;
-                        if (value > state.Max) state.Max = value;
-                    }
+                    tempState.AddValue(value);
                 }
-            }
-        };
+            });
+        }
+
+        state = tempState;
+        if (oldWindowStartTicks != windowStartTicks || oldWindowEndTicks != currentTimestamp)
+        {
+            IncrementWindowAdvanceCount();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ForEachEventInRange(int index, long fromTicks, long toTicks, Action<TEvent> action)
+    {
+        foreach (var item in EnumeratePartitionSnapshot(index).Where(item =>
+        {
+            if (_ts == null) return false;
+            var itemTicks = _ts.GetTimestamp(item).Ticks;
+            return itemTicks >= fromTicks && itemTicks <= toTicks;
+        }))
+        {
+            action(item);
+        }
     }
 
     /// <summary>
@@ -1190,130 +1094,51 @@ public sealed class EventStore<TEvent>
     private static bool TryExtractNumericValue(TEvent item, out double value)
     {
         value = 0.0;
-        
         if (item == null) return false;
-        
+
         var type = typeof(TEvent);
-        
-        // For Order type, extract Amount property
+
+        // Common fast-paths for known sample types
         if (type.Name == "Order")
         {
             var amountProperty = type.GetProperty("Amount");
             if (amountProperty != null)
             {
                 var amount = amountProperty.GetValue(item);
-                if (amount is decimal decimalAmount)
-                {
-                    value = (double)decimalAmount;
-                    return true;
-                }
-                if (amount is double doubleAmount)
-                {
-                    value = doubleAmount;
-                    return true;
-                }
-                if (amount is float floatAmount)
-                {
-                    value = (double)floatAmount;
-                    return true;
-                }
-                if (amount is int intAmount)
-                {
-                    value = (double)intAmount;
-                    return true;
-                }
-                if (amount is long longAmount)
-                {
-                    value = (double)longAmount;
-                    return true;
-                }
+                if (amount is decimal decimalAmount) { value = (double)decimalAmount; return true; }
+                if (amount is double doubleAmount) { value = doubleAmount; return true; }
+                if (amount is float floatAmount) { value = (double)floatAmount; return true; }
+                if (amount is int intAmount) { value = intAmount; return true; }
+                if (amount is long longAmount) { value = longAmount; return true; }
             }
         }
-        
-        // For MetricEvent type, extract Value property
         if (type.Name == "MetricEvent")
         {
             var valueProperty = type.GetProperty("Value");
             if (valueProperty != null)
             {
                 var val = valueProperty.GetValue(item);
-                if (val is double doubleVal)
-                {
-                    value = doubleVal;
-                    return true;
-                }
-                if (val is decimal decimalVal)
-                {
-                    value = (double)decimalVal;
-                    return true;
-                }
-                if (val is float floatVal)
-                {
-                    value = (double)floatVal;
-                    return true;
-                }
+                if (val is double dv) { value = dv; return true; }
+                if (val is decimal dd) { value = (double)dd; return true; }
+                if (val is float ff) { value = (double)ff; return true; }
             }
         }
-        
-        // Generic fallback: try to find any numeric property
-        var properties = type.GetProperties();
-        foreach (var prop in properties)
+
+        // Generic fallback: first numeric property
+        foreach (var prop in type.GetProperties())
         {
-            var propValue = prop.GetValue(item);
-            if (propValue is decimal decValue)
-            {
-                value = (double)decValue;
-                return true;
-            }
-            if (propValue is double doubleValue)
-            {
-                value = doubleValue;
-                return true;
-            }
-            if (propValue is float floatValue)
-            {
-                value = (double)floatValue;
-                return true;
-            }
-            if (propValue is int intValue)
-            {
-                value = (double)intValue;
-                return true;
-            }
-            if (propValue is long longValue)
-            {
-                value = (double)longValue;
-                return true;
-            }
+            var v = prop.GetValue(item);
+            if (v is decimal dec) { value = (double)dec; return true; }
+            if (v is double d) { value = d; return true; }
+            if (v is float f) { value = (double)f; return true; }
+            if (v is int i) { value = i; return true; }
+            if (v is long l) { value = l; return true; }
         }
-        
+
         return false;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static WindowItemCallback<TEvent, SumAggregateState<TResult>> CreateSumCallback<TResult>(Func<TEvent, TResult> selector)
-        where TResult : struct, INumber<TResult>
-    {
-        return (ref SumAggregateState<TResult> state, TEvent item, long ticks) =>
-        {
-            state.Sum += selector(item);
-        };
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static WindowItemCallback<TEvent, SumAggregateState<TResult>> CreateSumFilteredCallback<TResult>(
-        Func<TEvent, TResult> selector, 
-        Predicate<TEvent> filter)
-        where TResult : struct, INumber<TResult>
-    {
-        return (ref SumAggregateState<TResult> state, TEvent item, long ticks) =>
-        {
-            if (filter(item))
-            {
-                state.Sum += selector(item);
-            }
-        };
-    }    /// <summary>
+    /// <summary>
     /// High-performance batch append using optimized ring buffer operations.
     /// This version uses the optimized TryEnqueueBatch method for better performance.
     /// </summary>
@@ -1321,66 +1146,96 @@ public sealed class EventStore<TEvent>
     public int TryAppendBatch(ReadOnlySpan<TEvent> batch)
     {
         if (batch.IsEmpty) return 0;
-        
-        int totalWritten = 0;
-        
-        // For small batches, use simple approach to avoid allocation overhead
-        if (batch.Length <= 32)
+
+        if (IsSmallBatch(batch))
         {
-            foreach (var e in batch)
-            {
-                if (TryAppend(e))
-                    totalWritten++;
-            }
-            return totalWritten;
+            return AppendSmallBatch(batch);
         }
-          // For larger batches, group by partition
+
         var partitionCount = GetPartitionCount();
-        var partitionArrays = new TEvent[partitionCount][];
         var partitionCounts = new int[partitionCount];
-        
-        // First pass: count events per partition
+        CountEventsPerPartition(batch, partitionCount, partitionCounts);
+
+        var partitionArrays = AllocatePartitionArrays(partitionCounts);
+        DistributeEventsToPartitions(batch, partitionCount, partitionArrays, partitionCounts);
+
+        return AppendPartitionBatches(partitionArrays, partitionCounts);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsSmallBatch(ReadOnlySpan<TEvent> batch) => batch.Length <= 32;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int AppendSmallBatch(ReadOnlySpan<TEvent> batch)
+    {
+        int totalWritten = 0;
+        foreach (var e in batch)
+        {
+            if (TryAppend(e))
+                totalWritten++;
+        }
+        return totalWritten;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void CountEventsPerPartition(ReadOnlySpan<TEvent> batch, int partitionCount, int[] partitionCounts)
+    {
         foreach (var e in batch)
         {
             var partition = Partitioners.ForKey(e, partitionCount);
             partitionCounts[partition]++;
         }
-          // Allocate arrays for each partition
-        for (int i = 0; i < partitionCount; i++)
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TEvent[][] AllocatePartitionArrays(int[] partitionCounts)
+    {
+        var partitionArrays = new TEvent[partitionCounts.Length][];
+        for (int i = 0; i < partitionCounts.Length; i++)
         {
             if (partitionCounts[i] > 0)
             {
                 partitionArrays[i] = new TEvent[partitionCounts[i]];
             }
         }
-        
-        // Second pass: distribute events to partition arrays
-        Array.Clear(partitionCounts, 0, partitionCounts.Length); // Reuse as index counters
+        return partitionArrays;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void DistributeEventsToPartitions(ReadOnlySpan<TEvent> batch, int partitionCount, TEvent[][] partitionArrays, int[] partitionCounts)
+    {
+        Array.Clear(partitionCounts, 0, partitionCounts.Length);
         foreach (var e in batch)
         {
             var partition = Partitioners.ForKey(e, partitionCount);
-            if (partitionArrays[partition] != null)
+            var target = partitionArrays[partition];
+            if (target != null)
             {
-                partitionArrays[partition][partitionCounts[partition]++] = e;
+                target[partitionCounts[partition]++] = e;
             }
         }
-          // Batch append to each partition
-        for (int i = 0; i < partitionCount; i++)
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int AppendPartitionBatches(TEvent[][] partitionArrays, int[] partitionCounts)
+    {
+        int totalWritten = 0;
+        for (int i = 0; i < partitionArrays.Length; i++)
         {
-            if (partitionArrays[i] != null)
-            {                var written = TryEnqueueBatchToPartition(i, partitionArrays[i]);
-                totalWritten += written;
-                  // Update statistics
-                for (int j = 0; j < written; j++)
-                {
-                    _statistics.RecordAppend();
-                }
-                
-                // Update telemetry counter for successful appends
-                IncrementAppendCount(written);
+            var items = partitionArrays[i];
+            if (items == null || partitionCounts[i] == 0)
+                continue;
+
+            var written = TryEnqueueBatchToPartition(i, items);
+            totalWritten += written;
+
+            // Update statistics and telemetry for the number of successfully appended items
+            for (int j = 0; j < written; j++)
+            {
+                _statistics.RecordAppend();
             }
+            IncrementAppendCount(written);
         }
-        
         return totalWritten;
     }    /// <summary>
     /// Optimized batch append for single partition scenarios.
@@ -1409,111 +1264,109 @@ public sealed class EventStore<TEvent>
     {
         var partitionCount = GetPartitionCount();
         for (int i = 0; i < partitionCount; i++)
-        {            if (_usePadding)
+        {
+            if (_usePadding)
             {
-                // Use generic array pool for T
-                var pool = ArrayPool<TEvent>.Shared;
-                var partition = _paddedPartitions![i];
-                  // Fallback implementation for padded partitions
-                var tempBuffer = new TEvent[partition.Capacity];
-                var len = partition.Snapshot(tempBuffer);
-                for (int j = 0; j < len; j += chunkSize)
-                {
-                    var chunkLen = Math.Min(chunkSize, len - j);
-                    var chunk = tempBuffer.AsSpan(j, chunkLen);
-                    
-                    // Track bytes exposed for each chunk
-                    var bytesExposed = (long)chunkLen * sizeof(long); // Conservative estimate
-                    IncrementSnapshotBytesExposed(bytesExposed);
-                    
-                    processor(chunk);
-                }
+                ProcessPaddedPartitionSnapshot(i, processor, chunkSize);
             }
             else
-            {                // Use zero-allocation method for standard partitions
-                var partition = _partitions![i];
-                if (partition is LockFreeRingBuffer<TEvent> typedPartition)
-                {
-                    // Use generic array pool for T
-                    var pool = ArrayPool<TEvent>.Shared;                    typedPartition.SnapshotZeroAlloc<TEvent>((span) => {
-                        // Track bytes exposed for each chunk
-                        var bytesExposed = (long)span.Length * sizeof(long); // Conservative estimate
-                        IncrementSnapshotBytesExposed(bytesExposed);
-                        processor(span);
-                    }, pool, chunkSize);}                else
-                {
-                    // Fallback for other partition types
-                    var ringBuffer = _partitions![i];
-                    var tempBuffer = new TEvent[ringBuffer.Capacity];
-                    var len = ringBuffer.Snapshot(tempBuffer);
-                    if (len > 0)
-                    {                        for (int j = 0; j < len; j += chunkSize)
-                        {
-                            var chunkLen = Math.Min(chunkSize, len - j);
-                            var chunk = tempBuffer.AsSpan(j, chunkLen);
-                            
-                            // Track bytes exposed for each chunk
-                            var bytesExposed = (long)chunkLen * sizeof(long); // Conservative estimate
-                            IncrementSnapshotBytesExposed(bytesExposed);
-                            
-                            processor(chunk);
-                        }
-                    }
-                }
+            {
+                ProcessStandardPartitionSnapshot(i, processor, chunkSize);
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ProcessPaddedPartitionSnapshot(int index, Action<ReadOnlySpan<TEvent>> processor, int chunkSize)
+    {
+        var partition = _paddedPartitions![index];
+        var tempBuffer = new TEvent[partition.Capacity];
+        var len = partition.Snapshot(tempBuffer);
+        for (int j = 0; j < len; j += chunkSize)
+        {
+            var chunkLen = Math.Min(chunkSize, len - j);
+            var chunk = tempBuffer.AsSpan(j, chunkLen);
+            IncrementSnapshotBytesExposed((long)chunkLen * sizeof(long)); // conservative
+            processor(chunk);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ProcessStandardPartitionSnapshot(int index, Action<ReadOnlySpan<TEvent>> processor, int chunkSize)
+    {
+        var partition = _partitions![index];
+        if (partition is LockFreeRingBuffer<TEvent> typed)
+        {
+            var pool = ArrayPool<TEvent>.Shared;
+            typed.SnapshotZeroAlloc<TEvent>(span =>
+            {
+                IncrementSnapshotBytesExposed((long)span.Length * sizeof(long));
+                processor(span);
+            }, pool, chunkSize);
+        }
+        else
+        {
+            var temp = new TEvent[partition.Capacity];
+            var len = partition.Snapshot(temp);
+            for (int j = 0; j < len; j += chunkSize)
+            {
+                var chunkLen = Math.Min(chunkSize, len - j);
+                var chunk = temp.AsSpan(j, chunkLen);
+                IncrementSnapshotBytesExposed((long)chunkLen * sizeof(long));
+                processor(chunk);
             }
         }
     }
 
     /// <summary>
-    /// Zero-allocation filtered snapshot using chunked processing.
+    /// Zero-allocation filtered snapshot using chunked processing. Applies the provided filter and streams
+    /// chunks to the processor without allocating large intermediate collections.
     /// </summary>
+    /// <param name="filter">Predicate used to select events to include in the output chunks.</param>
+    /// <param name="processor">Callback invoked for each chunk of filtered events.</param>
+    /// <param name="chunkSize">Preferred chunk size for processing. Defaults to Buffers.DefaultChunkSize.</param>
     public void SnapshotFilteredZeroAlloc(Func<TEvent, bool> filter, Action<ReadOnlySpan<TEvent>> processor, int chunkSize = Buffers.DefaultChunkSize)
     {
         var pool = ArrayPool<TEvent>.Shared;
         var buffer = pool.Rent(chunkSize);
-        
         try
         {
-            var bufferCount = 0;
+            var count = 0;
             var partitionCount = GetPartitionCount();
-            
-            for (int p = 0; p < partitionCount; p++)
+            for (int i = 0; i < partitionCount; i++)
             {
-                var tempBuffer = new TEvent[GetPartitionCapacity(p)];
-                var len = _usePadding ? 
-                    _paddedPartitions![p].Snapshot(tempBuffer) :
-                    _partitions![p].Snapshot(tempBuffer);
-                
-                for (int i = 0; i < len; i++)
-                {
-                    var item = tempBuffer[i];
-                    if (filter(item))
-                    {
-                        buffer[bufferCount++] = item;                        if (bufferCount >= buffer.Length)
-                        {
-                            // Track bytes exposed for each chunk
-                            var bytesExposed = (long)bufferCount * sizeof(long); // Conservative estimate
-                            IncrementSnapshotBytesExposed(bytesExposed);
-                            
-                            processor(buffer.AsSpan(0, bufferCount));
-                            bufferCount = 0;
-                        }
-                    }
-                }
-            }            // Process remaining events
-            if (bufferCount > 0)
+                count = ProcessFilteredPartition(i, filter, processor, buffer, count, chunkSize);
+            }
+            if (count > 0)
             {
-                // Track bytes exposed for remaining events
-                var bytesExposed = (long)bufferCount * sizeof(long); // Conservative estimate
-                IncrementSnapshotBytesExposed(bytesExposed);
-                
-                processor(buffer.AsSpan(0, bufferCount));
+                processor(new ReadOnlySpan<TEvent>(buffer, 0, count));
+                IncrementSnapshotBytesExposed((long)count * sizeof(long));
             }
         }
         finally
         {
             pool.Return(buffer, clearArray: false);
         }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int ProcessFilteredPartition(int index, Func<TEvent, bool> filter, Action<ReadOnlySpan<TEvent>> processor, TEvent[] buffer, int count, int chunkSize)
+    {
+        var source = _usePadding
+            ? _paddedPartitions![index].EnumerateSnapshot()
+            : _partitions![index].EnumerateSnapshot();
+
+        foreach (var e in source.Where(filter))
+        {
+            buffer[count++] = e;
+            if (count == chunkSize)
+            {
+                processor(new ReadOnlySpan<TEvent>(buffer, 0, count));
+                IncrementSnapshotBytesExposed((long)count * sizeof(long));
+                count = 0;
+            }
+        }
+        return count;
     }
 
     /// <summary>
@@ -1542,6 +1395,12 @@ public sealed class EventStore<TEvent>
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int GetPartitionCount() => _usePadding ? _paddedPartitions!.Length : _partitions!.Length;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private IEnumerable<TEvent> EnumeratePartitionSnapshot(int partitionIndex)
+    {
+        return _usePadding ? _paddedPartitions![partitionIndex].EnumerateSnapshot() : _partitions![partitionIndex].EnumerateSnapshot();
+    }
     
     /// <summary>
     /// Helper to get capacity from the appropriate partition type.
