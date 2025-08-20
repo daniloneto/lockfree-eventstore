@@ -113,7 +113,12 @@ public sealed class EventStore<TEvent>
         get
         {
             var partitionCount = GetPartitionCount();
-            return Enumerable.Range(0, partitionCount).Sum(i => GetPartitionCapacity(i));
+            int total = 0;
+            for (int i = 0; i < partitionCount; i++)
+            {
+                total += GetPartitionCapacity(i);
+            }
+            return total;
         }
     }
 
@@ -317,7 +322,7 @@ public sealed class EventStore<TEvent>
             {
                 var eventTimestamp = _ts.GetTimestamp(e);
                 ref var windowState = ref _windowStates[partition];
-                AdvancePartitionWindow(ref windowState, eventTimestamp.Ticks);
+                AdvancePartitionWindow(partition, ref windowState, eventTimestamp.Ticks);
             }
         }
         return result;
@@ -364,7 +369,19 @@ public sealed class EventStore<TEvent>
     public bool TryAppend(KeyId keyId, TEvent value, long timestamp)
     {
         var partition = Partitioners.ForKeyIdSimple(keyId, GetPartitionCount());
-        return TryAppend(value, partition);
+        // Use provided timestamp; do not delegate to the non-timestamp overload
+        if (!TryEnqueueToPartition(partition, value))
+            return false;
+
+        _statistics.RecordAppend();
+        IncrementAppendCount();
+
+        if (_ts != null && _options.WindowSizeTicks.HasValue)
+        {
+            ref var windowState = ref _windowStates[partition];
+            AdvancePartitionWindow(partition, ref windowState, timestamp);
+        }
+        return true;
     }
 
     /// <summary>
@@ -455,15 +472,22 @@ public sealed class EventStore<TEvent>
 
         var pool = ArrayPool<TEvent>.Shared;
         var tempBuffer = pool.Rent(16384);
+        TEvent[]? keptBuffer = null;
+        var clear = RuntimeHelpers.IsReferenceOrContainsReferences<TEvent>();
         try
         {
             var result = CollectEventsToKeep(olderThan, pool, tempBuffer);
+            keptBuffer = result.buffer;
             ClearAllPartitions();
             ReAddKeptEvents(result.buffer, result.count);
         }
         finally
         {
-            pool.Return(tempBuffer, clearArray: false);
+            if (keptBuffer != null && !ReferenceEquals(keptBuffer, tempBuffer))
+            {
+                pool.Return(keptBuffer, clearArray: clear);
+            }
+            pool.Return(tempBuffer, clearArray: clear);
         }
     }
 
@@ -493,7 +517,7 @@ public sealed class EventStore<TEvent>
         var old = buffer;
         var newBuf = pool.Rent(Math.Max(old.Length * 2, needed));
         Array.Copy(old, 0, newBuf, 0, old.Length);
-        pool.Return(old);
+        pool.Return(old, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<TEvent>());
         return newBuf;
     }
 
@@ -579,8 +603,9 @@ public sealed class EventStore<TEvent>
             var capacity = GetPartitionCapacity(i);
             var tempBuffer = new TEvent[capacity];
             var actualLen = _usePadding ? _paddedPartitions![i].Snapshot(tempBuffer) : _partitions![i].Snapshot(tempBuffer);
-            tempBuffer.AsSpan(0, actualLen).CopyTo(result.AsSpan(idx));
-            idx += actualLen;
+            var copyLen = Math.Min(actualLen, expectedLen);
+            tempBuffer.AsSpan(0, copyLen).CopyTo(result.AsSpan(idx));
+            idx += copyLen;
         }
         return idx;
     }
@@ -1097,7 +1122,7 @@ public sealed class EventStore<TEvent>
     /// Removes events older than (currentTimestamp - WindowSizeTicks) from the window state.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void AdvancePartitionWindow(ref PartitionWindowState state, long currentTimestamp)
+    private void AdvancePartitionWindow(int partitionIndex, ref PartitionWindowState state, long currentTimestamp)
     {
         if (_ts == null) return;
 
@@ -1116,17 +1141,13 @@ public sealed class EventStore<TEvent>
         tempState.Min = double.MaxValue;
         tempState.Max = double.MinValue;
 
-        var partitionCount = GetPartitionCount();
-        for (int p = 0; p < partitionCount; p++)
+        ForEachEventInRange(partitionIndex, windowStartTicks, currentTimestamp, item =>
         {
-            ForEachEventInRange(p, windowStartTicks, currentTimestamp, item =>
+            if (TryExtractNumericValue(item, out double value))
             {
-                if (TryExtractNumericValue(item, out double value))
-                {
-                    tempState.AddValue(value);
-                }
-            });
-        }
+                tempState.AddValue(value);
+            }
+        });
 
         state = tempState;
         if (oldWindowStartTicks != windowStartTicks || oldWindowEndTicks != currentTimestamp)
