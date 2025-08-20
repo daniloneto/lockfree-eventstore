@@ -1,18 +1,34 @@
 using LockFree.EventStore;
+using Microsoft.Extensions.DependencyInjection;
+using GatewayClient;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure EventStore base URL from configuration or environment (no hardcoded defaults)
+var eventStoreBaseUrl = builder.Configuration["EventStore:BaseUrl"]
+    ?? builder.Configuration["EVENTSTORE_URL"];
+if (string.IsNullOrWhiteSpace(eventStoreBaseUrl))
+{
+    throw new InvalidOperationException("Event store base URL is not configured. Set 'EVENTSTORE_URL' or 'EventStore:BaseUrl'.");
+}
+
+// Register a named HttpClient for the EventStore
+builder.Services.AddHttpClient("EventStore", client =>
+{
+    client.BaseAddress = new Uri(eventStoreBaseUrl, UriKind.Absolute);
+});
+
 var app = builder.Build();
 
 // Each gateway client has its own logical instance id
 var gatewayId = Environment.GetEnvironmentVariable("GATEWAY_ID") ?? Guid.NewGuid().ToString("n");
-var eventStoreUrl = Environment.GetEnvironmentVariable("EVENTSTORE_URL") ?? "http://eventstore:7070"; // docker service name
 
 // Local in-memory aggregation of what this gateway sent (for quick per-gateway stats)
 long sentCount = 0;
 object sync = new();
 
-// Shared HttpClient for posting to central event store server (MetricsDashboard or future dedicated API)
-var http = new HttpClient { BaseAddress = new Uri(eventStoreUrl) };
+// Resolve HttpClient for posting to central event store server (MetricsDashboard or future dedicated API)
+var http = app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("EventStore");
 var stream = "gateway/orders";
 
 // Health
@@ -94,12 +110,15 @@ app.MapGet("/stats/global", async () =>
     }
 });
 
-app.Run();
+await app.RunAsync();
 
-internal class GatewayOrderCreated
+namespace GatewayClient
 {
-    public string Id { get; set; } = string.Empty;
-    public int Valor { get; set; }
-    public DateTime Timestamp { get; set; }
-    public string GatewayId { get; set; } = string.Empty;
+    internal class GatewayOrderCreated
+    {
+        public string Id { get; set; } = string.Empty;
+        public int Valor { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string GatewayId { get; set; } = string.Empty;
+    }
 }

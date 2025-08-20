@@ -25,9 +25,10 @@ public static class Partitioners
         if (partitions <= 0)
             throw new ArgumentOutOfRangeException(nameof(partitions));
         
-        // Use the KeyId value directly with fast modulo
-        // Since KeyId values are sequential, this provides good distribution
-        return (int)PerformanceHelpers.FastMod((uint)keyId.Value, (uint)partitions);
+        // Use fast bitmask when partitions is a power of two; otherwise fallback to modulo
+        if (PerformanceHelpers.IsPowerOfTwo(partitions))
+            return PerformanceHelpers.FastMod(keyId.Value, partitions);
+        return keyId.Value % partitions;
     }
 
     /// <summary>

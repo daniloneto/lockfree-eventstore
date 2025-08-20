@@ -110,7 +110,7 @@ public sealed class LockFreeEventRingBuffer
         for (int i = 0; i < batch.Length; i++)
         {
             var position = startTail - batch.Length + i;
-            _buffer[position % _capacity] = batch[i];
+            _buffer[(int)(position % _capacity)] = batch[i];
         }
         
         // Advance head if necessary to maintain ring buffer invariant
@@ -270,13 +270,15 @@ public sealed class LockFreeEventRingBuffer
         Buffers.WithRentedBuffer<Event>(Math.Min(chunkSize, (int)count), buffer =>
         {
             var bufferCount = 0;
+            // Respect requested chunk size even if pool returns larger arrays
+            var effectiveChunk = Math.Min(chunkSize, buffer.Length);
             
             for (long i = 0; i < count; i++)
             {
                 var index = (int)((head + i) % _capacity);
                 buffer[bufferCount++] = _buffer[index];
                 
-                if (bufferCount >= buffer.Length)
+                if (bufferCount >= effectiveChunk)
                 {
                     processor(buffer.AsSpan(0, bufferCount));
                     bufferCount = 0;
@@ -306,6 +308,7 @@ public sealed class LockFreeEventRingBuffer
         Buffers.WithRentedBuffer<Event>(chunkSize, buffer =>
         {
             var bufferCount = 0;
+            var effectiveChunk = Math.Min(chunkSize, buffer.Length);
             
             for (long i = 0; i < count; i++)
             {
@@ -316,7 +319,7 @@ public sealed class LockFreeEventRingBuffer
                 {
                     buffer[bufferCount++] = item;
                     
-                    if (bufferCount >= buffer.Length)
+                    if (bufferCount >= effectiveChunk)
                     {
                         processor(buffer.AsSpan(0, bufferCount));
                         bufferCount = 0;

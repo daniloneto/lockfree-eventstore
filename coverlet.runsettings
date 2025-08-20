@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat Code Coverage">
+        <Configuration>
+          <!-- Generate Cobertura XML and LCOV outputs -->
+          <Format>cobertura,lcov</Format>
+          <!-- Include only the main library under test -->
+          <Include>[LockFree.EventStore]*</Include>
+          <!-- Exclude test projects, generated and compiler-generated code -->
+          <Exclude>[xunit.*]*,[*.Tests]*</Exclude>
+          <ExcludeByAttribute>Obsolete,GeneratedCodeAttribute,CompilerGeneratedAttribute</ExcludeByAttribute>
+          <!-- Don't auto-exclude files by default to keep control via Include/Exclude -->
+          <SkipAutoExclude>true</SkipAutoExclude>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

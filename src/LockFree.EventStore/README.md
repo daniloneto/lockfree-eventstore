@@ -1,92 +1,92 @@
-# <img src="https://raw.githubusercontent.com/daniloneto/lockfree-eventstore/refs/heads/main/lockfreeeventstore.png" />
+# LockFree.EventStore
 [![CI](https://github.com/daniloneto/lockfree-eventstore/actions/workflows/ci.yml/badge.svg)](https://github.com/daniloneto/lockfree-eventstore/actions)
 [![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.Event.Store)
 
-**Um banco de eventos em memória, rodando como serviço, para sincronizar e validar operações entre múltiplas instâncias com alta concorrência e sem travas.**
+**An in-memory event store, running as a service, to synchronize and validate operations across multiple instances with high concurrency and no locks.**
 
 ---
 
-## 🚀 Comece em 3 passos
+## 🚀 Get started in 3 steps
 
-### 1. Suba o servidor
+### 1. Run the server
 ```bash
 docker run --rm -p 7070:7070 daniloneto/lockfree-eventstore:latest
 ```
 
-### 2. Adicione o cliente
+### 2. Add the client
 ```bash
 dotnet add package LockFree.EventStore
 ```
 
-### 3. Escreva e leia
+### 3. Write and read
 ```csharp
 var es = new EventStoreClient("http://localhost:7070");
 await es.Append("gateway/orders", new OrderCreated { Id = "o-1", Valor = 123 });
 await foreach (var ev in es.Read("gateway/orders", from: 0))
 {
-    /* tratar evento */
+    /* handle event */
 }
 ```
 
-### 🔁 Sample de Cliente
-Veja `samples/ClientSample` para um exemplo que:
-- Envia eventos em paralelo para `gateway/orders`
-- Lê os eventos de volta
-- Calcula agregações locais
+### 🔁 Client Sample
+See `samples/ClientSample` for an example that:
+- Sends events in parallel to `gateway/orders`
+- Reads the events back
+- Computes local aggregations
 
-Para executar:
+To run:
 ```bash
 docker run --rm -p 7070:7070 daniloneto/lockfree-eventstore:latest
 cd samples/ClientSample
  dotnet run
 ```
 
-## 🌐 Exemplo com múltiplos Gateways (docker-compose)
+## 🌐 Example with multiple Gateways (docker-compose)
 
-Subir 1 EventStore, 3 gateways e Nginx balanceando:
+Start 1 EventStore, 3 gateways and Nginx load balancing:
 ```bash
 docker compose up --build
 ```
-Testar envio de pedidos (balanceado entre gateways):
+Test sending orders (load balanced across gateways):
 ```bash
 curl -X POST http://localhost:8080/orders
 curl -X POST 'http://localhost:8080/orders/bulk?n=50'
 ```
-Ver estatísticas:
+View statistics:
 ```bash
-curl http://localhost:8080/stats/local    # stats de um gateway (um dos 3)
-curl http://localhost:8080/stats/global   # consolidação global (via leitura central)
+curl http://localhost:8080/stats/local    # stats of one gateway (one of the 3)
+curl http://localhost:8080/stats/global   # global consolidation (via central reader)
 ```
 ---
 
-## 💡 Por que usar
-- **Concorrência real:** múltiplos gravadores sem mutex.
-- **Integridade garantida:** ordenação consistente, append condicional e idempotência.
-- **Operação simples:** sem coordenação externa, sem dependências.
+## 💡 Why use it
+- **Real concurrency:** multiple writers without mutexes.
+- **Guaranteed integrity:** consistent ordering, conditional append, and idempotency.
+- **Simple operation:** no external coordination, no dependencies.
 
 ---
 
-## 📌 Cenário típico
-Dois (ou mais) gateways atrás de um balanceador de carga precisam registrar operações no mesmo stream.  
-O **Lockfree.EventStore** garante ordem e integridade mesmo sob alto paralelismo, sem depender de locks, mantendo todo o estado em memória.
+## 📌 Typical scenario
+Two (or more) gateways behind a load balancer need to record operations to the same stream.  
+**Lockfree.EventStore** ensures order and integrity even under high parallelism, without relying on locks, keeping all state in memory.
 
 ---
 
-## 📚 Documentação completa
+## 📚 Complete documentation
 
-A seguir, a documentação técnica completa da API, recursos avançados, benchmarks e exemplos de uso.
+Below is the full technical documentation of the API, advanced features, benchmarks, and usage examples.
 
-## Principais Recursos
-- Escrita MPMC lock-free com descarte FIFO
-- Particionamento por chave para alta concorrência
-- Snapshots consistentes sem bloquear produtores
-- Agregações funcionais e consultas por janela temporal
-- Zero dependências externas, pronto para AOT/Trimming
-- API fluente para configuração avançada
-- Métricas e observabilidade integradas
-- Agregações especializadas (Soma, Média, Mínimo, Máximo)
+## Key Features
+- Lock-free MPMC writes with FIFO discard
+- Key-based partitioning for high concurrency
+- Consistent snapshots without blocking producers
+- Functional aggregations and time-window queries
+- Zero external dependencies, ready for AOT/Trimming
+- Fluent API for advanced configuration
+- Built-in metrics and observability
+- Specialized aggregations (Sum, Average, Min, Max)
 
-## Exemplo de Uso Básico
+## Basic Usage Example
 ```csharp
 var store = new EventStore<Pedido>();
 store.TryAppend(new Pedido { Id = 1, Valor = 10m, Timestamp = DateTime.UtcNow });
@@ -95,59 +95,59 @@ var total = store.Aggregate(() => 0m, (acc, e) => acc + e.Valor,
     from: DateTime.UtcNow.AddMinutes(-10));
 ```
 
-## Novos Construtores
+## New Constructors
 ```csharp
-// Capacidade explícita
+// Explicit capacity
 var store = new EventStore<Pedido>(capacidade: 100_000);
 
-// Capacidade e partições
+// Capacity and partitions
 var store = new EventStore<Pedido>(capacidade: 50_000, particoes: 8);
 
-// Configuração avançada
+// Advanced configuration
 var store = new EventStore<Pedido>(new EventStoreOptions<Pedido>
 {
     Capacidade = 100_000,
     Particoes = 16,
-    OnEventDiscarded = evt => Logger.LogTrace("Evento descartado: {Event}", evt),
-    OnCapacityReached = () => Metrics.IncrementCounter("eventstore.capacidade_atingida"),
+    OnEventDiscarded = evt => Logger.LogTrace("Event discarded: {Event}", evt),
+    OnCapacityReached = () => Metrics.IncrementCounter("eventstore.capacity_reached"),
     TimestampSelector = new PedidoTimestampSelector()
 });
 
-// API fluente
+// Fluent API
 var store = EventStore.For<Pedido>()
     .WithCapacity(100_000)
     .WithPartitions(8)
     .OnDiscarded(evt => Log(evt))
-    .OnCapacityReached(() => NotificarAdmin())
+    .OnCapacityReached(() => NotifyAdmin())
     .WithTimestampSelector(new PedidoTimestampSelector())
     .Create();
 ```
 
-## Propriedades de Estado
+## State Properties
 ```csharp
-store.Count          // Número atual de eventos
-store.Capacity       // Capacidade máxima configurada
-store.IsEmpty        // Se está vazio
-store.IsFull         // Se atingiu capacidade máxima
-store.Partitions     // Número de partições
+store.Count          // Current number of events
+store.Capacity       // Maximum configured capacity
+store.IsEmpty        // Whether it's empty
+store.IsFull         // Whether it reached maximum capacity
+store.Partitions     // Number of partitions
 ```
 
-## Agregações Especializadas
+## Specialized Aggregations
 ```csharp
-// Contagem por janela temporal
+// Count by time window
 var count = store.Count(from: inicio, to: fim);
 
-// Soma de valores
+// Sum of values
 var sum = store.Sum(evt => evt.Valor, from: inicio, to: fim);
 
-// Média
+// Average
 var avg = store.Average(evt => evt.Valor, from: inicio, to: fim);
 
-// Mínimo e máximo
+// Min and max
 var min = store.Min(evt => evt.Pontuacao, from: inicio, to: fim);
 var max = store.Max(evt => evt.Pontuacao, from: inicio, to: fim);
 
-// Com filtros
+// With filters
 var filteredSum = store.Sum(
     evt => evt.Valor, 
     filter: evt => evt.Tipo == "Pagamento",
@@ -156,17 +156,17 @@ var filteredSum = store.Sum(
 );
 ```
 
-## Snapshots com Filtros
+## Snapshots with Filters
 ```csharp
-// Snapshot filtrado
+// Filtered snapshot
 var eventosRecentes = store.Snapshot(
     filter: evt => evt.Timestamp > DateTime.UtcNow.AddMinutes(-5)
 );
 
-// Snapshot por janela temporal
+// Snapshot by time window
 var snapshot = store.Snapshot(from: inicio, to: fim);
 
-// Snapshot com filtro e janela temporal
+// Snapshot with filter and time window
 var filtrado = store.Snapshot(
     filter: evt => evt.Valor > 100,
     from: inicio,
@@ -174,93 +174,94 @@ var filtrado = store.Snapshot(
 );
 ```
 
-## Limpeza e Manutenção
+## Cleanup and Maintenance
 ```csharp
-// Limpar todos os eventos
+// Clear all events
 store.Clear();
-store.Reset(); // Alias para Clear()
+store.Reset(); // Alias for Clear()
 
-// Purgar eventos antigos (requer TimestampSelector)
+// Purge old events (requires TimestampSelector)
 store.Purge(olderThan: DateTime.UtcNow.AddHours(-1));
 ```
 
-## Métricas e Observabilidade
+## Metrics and Observability
 ```csharp
-// Estatísticas detalhadas
-store.Statistics.TotalAppended        // Total de eventos adicionados
-store.Statistics.TotalDiscarded       // Total de eventos descartados
-store.Statistics.AppendsPerSecond     // Taxa atual de adições
-store.Statistics.LastAppendTime       // Timestamp da última adição
+// Detailed statistics
+store.Statistics.TotalAppended        // Total appended events
+store.Statistics.TotalDiscarded       // Total discarded events
+store.Statistics.AppendsPerSecond     // Current append rate
+store.Statistics.LastAppendTime       // Timestamp of the last append
 ```
 
-## Exemplos
+## Examples
 
 ### MetricsDashboard
-API web completa para coleta e consulta de métricas em tempo real:
+Fully featured web API for collecting and querying real-time metrics:
 
 ```bash
-cd .\samples\MetricsDashboarddotnet run
+cd .\samples\MetricsDashboard
+ dotnet run
 ```
 
-Endpoints disponíveis:
-- `POST /metrics` - Adicionar métrica
-- `GET /metrics/sum?label=cpu_usage` - Somar valores por label
-- `GET /metrics/top?k=5` - Top K métricas
+Available endpoints:
+- `POST /metrics` - Add metric
+- `GET /metrics/sum?label=cpu_usage` - Sum values by label
+- `GET /metrics/top?k=5` - Top K metrics
 
-Veja `samples/MetricsDashboard/TESTING.md` para guia completo de testes.
+See `samples/MetricsDashboard/TESTING.md` for a complete testing guide.
 
-## API Completa
-- `TryAppend(event)` — Adiciona evento, lock-free
-- `Aggregate` — Agrega valores por janela temporal
-- `Snapshot()` — Retorna cópia imutável dos eventos
-- `Count/Sum/Average/Min/Max` — Agregações especializadas
-- `Clear/Reset/Purge` — Métodos de limpeza
-- `Query` — Consultas flexíveis com filtros
-- `Statistics` — Métricas para monitoramento
+## Full API
+- `TryAppend(event)` — Adds an event, lock-free
+- `Aggregate` — Aggregates values by time window
+- `Snapshot()` — Returns an immutable copy of events
+- `Count/Sum/Average/Min/Max` — Specialized aggregations
+- `Clear/Reset/Purge` — Cleanup methods
+- `Query` — Flexible queries with filters
+- `Statistics` — Monitoring metrics
 
-## Partições
-O número de partições padrão é `Environment.ProcessorCount`. É possível forçar a partição usando `TryAppend(e, partition)`.
+## Partitions
+The default number of partitions is `Environment.ProcessorCount`. You can force the partition using `TryAppend(e, partition)`.
 
 ## Snapshots
-`Snapshot()` retorna uma cópia imutável aproximada do estado atual de todas as partições, ordenada do evento mais antigo para o mais novo por partição.
+`Snapshot()` returns an approximate immutable copy of the current state of all partitions, ordered from the oldest to the newest event per partition.
 
 ## Performance
-Projetado para alta concorrência e baixa latência. A ordem global entre partições é aproximada.
+Designed for high concurrency and low latency. Global order across partitions is approximate.
 
 ---
 
-## Benchmarks de Performance
+## Performance Benchmarks
 
-### Tipos por Valor vs Tipos por Referência
+### Value Types vs Reference Types
 
-| Operação                  | Tipo Valor    | Tipo Referência | Melhoria   |
-|---------------------------|---------------|-----------------|------------|
-| Adição de Evento          | 560 ms        | 797 ms          | 42% mais rápido |
-| Iteração de Eventos       | 35.8 ns       | 132.5 ns        | 74% mais rápido |
-| Consultas de Eventos      | 393.5 ns      | 1,749.1 ns      | 77% mais rápido |
+| Operation                 | Value Type    | Reference Type  | Improvement |
+|--------------------------|---------------|-----------------|-------------|
+| Event append             | 560 ms        | 797 ms          | 42% faster  |
+| Event iteration          | 35.8 ns       | 132.5 ns        | 74% faster  |
+| Event queries            | 393.5 ns      | 1,749.1 ns      | 77% faster  |
 
 ### Structure of Arrays (SoA) vs Array of Structures (AoS)
 
-| Operação                  | SoA           | AoS             | Melhoria   |
-|---------------------------|---------------|-----------------|------------|
-| Agregação por Chave       | 55.2 ms       | 74.6 ms         | 26% mais rápido |
-| Uso de Memória            | Menor         | Maior           | Variável   |
+| Operation                 | SoA           | AoS             | Improvement |
+|--------------------------|---------------|-----------------|-------------|
+| Key aggregation          | 55.2 ms       | 74.6 ms         | 26% faster  |
+| Memory usage             | Lower         | Higher          | Varies      |
 
-**Conclusões:**
-1. Tipos por valor são significativamente mais rápidos que tipos por referência para leitura e escrita.
-2. SoA melhora cache locality e reduz pressão de memória.
-3. Para alto throughput, a implementação `EventStoreV2` é recomendada.
+**Conclusions:**
+1. Value types are significantly faster than reference types for reads and writes.
+2. SoA improves cache locality and reduces memory pressure.
+3. For high throughput, the `EventStoreV2` implementation is recommended.
 
 ```csharp
-// Usando EventStoreV2 com tipos por valor
+// Using EventStoreV2 with value types
 var store = new EventStoreV2(capacidade: 1_000_000, particoes: 16);
 store.Add("sensor1", 25.5, DateTime.UtcNow.Ticks);
 double media = store.Average("sensor1");
 ```
 
-## Limitações
-- Ordem global apenas aproximada entre partições
-- Capacidade fixa; eventos antigos são descartados ao exceder
+## Limitations
+- Global order is only approximate across partitions
+- Fixed capacity; old events are discarded when exceeded
 
-## Licença
+## License
 MIT

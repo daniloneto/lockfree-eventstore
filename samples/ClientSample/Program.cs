@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
-using System.Text.Json;
+using LockFree.EventStore;
+using System.Linq;
+
+namespace ClientSample;
 
 // Client sample for the lockfree-eventstore Docker server (MetricsDashboard)
 // It will:
@@ -10,19 +13,21 @@ using System.Text.Json;
 // 4. Query window aggregation (/metrics/window)
 // 5. Display raw JSON for advanced endpoints
 
-public record MetricEvent(string Label, double Value, DateTime Timestamp);
-
-public class Program
+public static class Program
 {
     private static readonly string[] Labels = ["cpu", "mem", "disk", "latency"];
-    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
     public static async Task Main(string[] args)
     {
-        var baseUrl = Environment.GetEnvironmentVariable("EVENTSTORE_URL") ?? "http://localhost:7070";
-        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        if (!TryResolveBaseUrl(out var baseUri))
+        {
+            Console.WriteLine("Base URL not found. Configure .env (EVENTSTORE_URL=...) or set the EVENTSTORE_URL environment variable.");
+            return;
+        }
 
-        Console.WriteLine($"== LockFree.EventStore Metrics Client ==\nTarget: {baseUrl}\n");
+        using var http = new HttpClient { BaseAddress = baseUri };
+
+        Console.WriteLine($"== LockFree.EventStore Metrics Client ==\nTarget: {baseUri}\n");
 
         int total = 500; // number of events
         int parallelism = Environment.ProcessorCount;
@@ -127,5 +132,107 @@ public class Program
         {
             Console.WriteLine($" -> {path}: failed ({ex.Message})");
         }
+    }
+
+    private static bool TryResolveBaseUrl(out Uri baseUri)
+    {
+        baseUri = null!;
+        string? candidate = null;
+
+        // Try environment variable first, then .env
+        candidate = Environment.GetEnvironmentVariable("EVENTSTORE_URL");
+        candidate ??= LoadDotEnv("EVENTSTORE_URL");
+
+        if (!string.IsNullOrWhiteSpace(candidate) &&
+            Uri.TryCreate(candidate, UriKind.Absolute, out var uri) &&
+            (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+        {
+            baseUri = uri;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string? LoadDotEnv(string key)
+    {
+        try
+        {
+            foreach (var path in GetEnvFileCandidates())
+            {
+                var value = GetEnvValueFromFile(path, key);
+                if (!string.IsNullOrEmpty(value)) return value;
+            }
+        }
+        catch
+        {
+            // ignore errors reading .env files
+        }
+        return null;
+    }
+
+    // Build and yield existing candidate .env file paths
+    private static IEnumerable<string> GetEnvFileCandidates()
+    {
+        var cwd = Directory.GetCurrentDirectory();
+        var candidates = new string?[]
+        {
+            FindFileUpwards(cwd, ".env"),
+            FindFileUpwards(AppContext.BaseDirectory, ".env"),
+            Path.Combine(cwd, "samples", "ClientSample", ".env"),
+            FindFileUpwards(cwd, ".env.example"),
+            FindFileUpwards(AppContext.BaseDirectory, ".env.example"),
+            Path.Combine(cwd, "samples", "ClientSample", ".env.example")
+        };
+
+        foreach (var p in candidates.Where(p => !string.IsNullOrEmpty(p) && File.Exists(p)))
+            yield return p!;
+    }
+
+    // Try to read a specific key from a given .env file
+    private static string? GetEnvValueFromFile(string path, string key)
+    {
+        foreach (var raw in File.ReadLines(path))
+        {
+            if (TryParseEnvLine(raw, out var k, out var v) &&
+                string.Equals(k, key, StringComparison.OrdinalIgnoreCase))
+            {
+                return v;
+            }
+        }
+        return null;
+    }
+
+    // Parse a .env line into key/value
+    private static bool TryParseEnvLine(string line, out string key, out string value)
+    {
+        key = string.Empty;
+        value = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(line)) return false;
+
+        var trimmed = line.Trim();
+        if (trimmed.Length == 0 || trimmed.StartsWith('#')) return false;
+
+        var idx = trimmed.IndexOf('=');
+        if (idx <= 0) return false;
+
+        key = trimmed[..idx].Trim();
+        value = trimmed[(idx + 1)..].Trim().Trim('"');
+        return key.Length > 0;
+    }
+
+    private static string? FindFileUpwards(string startDir, string fileName)
+    {
+        var dir = new DirectoryInfo(startDir);
+        while (dir != null)
+        {
+            var candidate = Path.Combine(dir.FullName, fileName);
+            if (File.Exists(candidate)) return candidate;
+
+            // Move to parent; loop condition will terminate when dir becomes null
+            dir = dir.Parent;
+        }
+        return null;
     }
 }
