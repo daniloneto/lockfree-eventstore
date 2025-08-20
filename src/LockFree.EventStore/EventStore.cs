@@ -984,6 +984,16 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
+    /// Overload that accepts DateTime parameters for convenience.
+    /// </summary>
+    public WindowAggregateResult AggregateWindow(DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
+    {
+        var fromTicks = from?.Ticks ?? long.MinValue;
+        var toTicks = to?.Ticks ?? long.MaxValue;
+        return AggregateWindow(fromTicks, toTicks, filter);
+    }
+
+    /// <summary>
     /// Performs window aggregation for a single partition within the specified time range and optional filter.
     /// </summary>
     /// <param name="index">Partition index.</param>
@@ -1033,16 +1043,6 @@ public sealed class EventStore<TEvent>
             if (value < state.Min) state.Min = value;
             if (value > state.Max) state.Max = value;
         }
-    }
-
-    /// <summary>
-    /// Overload that accepts DateTime parameters for convenience.
-    /// </summary>
-    public WindowAggregateResult AggregateWindow(DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
-    {
-        var fromTicks = from?.Ticks ?? long.MinValue;
-        var toTicks = to?.Ticks ?? long.MaxValue;
-        return AggregateWindow(fromTicks, toTicks, filter);
     }
 
     /// <summary>

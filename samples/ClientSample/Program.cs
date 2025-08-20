@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
 using LockFree.EventStore;
+using System.Linq;
 
 namespace ClientSample;
 
@@ -139,7 +140,7 @@ public static class Program
         string? candidate = null;
 
         // Try environment variable first, then .env
-        candidate ??= Environment.GetEnvironmentVariable("EVENTSTORE_URL");
+        candidate = Environment.GetEnvironmentVariable("EVENTSTORE_URL");
         candidate ??= LoadDotEnv("EVENTSTORE_URL");
 
         if (!string.IsNullOrWhiteSpace(candidate) &&
@@ -184,11 +185,8 @@ public static class Program
             Path.Combine(cwd, "samples", "ClientSample", ".env.example")
         };
 
-        foreach (var p in candidates)
-        {
-            if (!string.IsNullOrEmpty(p) && File.Exists(p))
-                yield return p!;
-        }
+        foreach (var p in candidates.Where(p => !string.IsNullOrEmpty(p) && File.Exists(p)))
+            yield return p!;
     }
 
     // Try to read a specific key from a given .env file
@@ -232,9 +230,8 @@ public static class Program
             var candidate = Path.Combine(dir.FullName, fileName);
             if (File.Exists(candidate)) return candidate;
 
-            var parent = dir.Parent;
-            if (parent is null) break;
-            dir = parent;
+            // Move to parent; loop condition will terminate when dir becomes null
+            dir = dir.Parent;
         }
         return null;
     }
