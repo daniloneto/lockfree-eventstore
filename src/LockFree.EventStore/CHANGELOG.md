@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.6 - 2025-08-20
+### Added
+- Arquivos .env e .env.example nos samples (ClientSample e GatewayClient)
+
+### Changed
+- Refatoração da estrutura de código para melhor legibilidade e manutenção
+- Ajustes nos samples para configuração via variáveis de ambiente
+- Documentação: README traduzido para inglês
+
 ## 1.0.3 - 2025-08-10
 ### Added
 - Endpoints genéricos de streams (/streams/{*stream} POST/GET, agregação via ?aggregate=true)
