@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
-using System.Text.Json;
+using LockFree.EventStore;
+
+namespace ClientSample;
 
 // Client sample for the lockfree-eventstore Docker server (MetricsDashboard)
 // It will:
@@ -10,19 +12,21 @@ using System.Text.Json;
 // 4. Query window aggregation (/metrics/window)
 // 5. Display raw JSON for advanced endpoints
 
-public record MetricEvent(string Label, double Value, DateTime Timestamp);
-
-public class Program
+public static class Program
 {
     private static readonly string[] Labels = ["cpu", "mem", "disk", "latency"];
-    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web) { WriteIndented = true };
 
     public static async Task Main(string[] args)
     {
-        var baseUrl = Environment.GetEnvironmentVariable("EVENTSTORE_URL") ?? "http://localhost:7070";
-        using var http = new HttpClient { BaseAddress = new Uri(baseUrl) };
+        if (!TryResolveBaseUrl(out var baseUri))
+        {
+            Console.WriteLine("Base URL not found. Configure .env (EVENTSTORE_URL=...) or set the EVENTSTORE_URL environment variable.");
+            return;
+        }
 
-        Console.WriteLine($"== LockFree.EventStore Metrics Client ==\nTarget: {baseUrl}\n");
+        using var http = new HttpClient { BaseAddress = baseUri };
+
+        Console.WriteLine($"== LockFree.EventStore Metrics Client ==\nTarget: {baseUri}\n");
 
         int total = 500; // number of events
         int parallelism = Environment.ProcessorCount;
@@ -127,5 +131,74 @@ public class Program
         {
             Console.WriteLine($" -> {path}: failed ({ex.Message})");
         }
+    }
+
+    private static bool TryResolveBaseUrl(out Uri baseUri)
+    {
+        baseUri = null!;
+        string? candidate = null;
+
+        // Try environment variable first, then .env
+        candidate ??= Environment.GetEnvironmentVariable("EVENTSTORE_URL");
+        candidate ??= LoadDotEnv("EVENTSTORE_URL");
+
+        if (!string.IsNullOrWhiteSpace(candidate) &&
+            Uri.TryCreate(candidate, UriKind.Absolute, out var uri) &&
+            (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+        {
+            baseUri = uri;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string? LoadDotEnv(string key)
+    {
+        try
+        {
+            var cwd = Directory.GetCurrentDirectory();
+            var candidates = new List<string?>
+            {
+                FindFileUpwards(cwd, ".env"),
+                FindFileUpwards(AppContext.BaseDirectory, ".env"),
+                Path.Combine(cwd, "samples", "ClientSample", ".env"),
+                FindFileUpwards(cwd, ".env.example"),
+                FindFileUpwards(AppContext.BaseDirectory, ".env.example"),
+                Path.Combine(cwd, "samples", "ClientSample", ".env.example")
+            };
+
+            foreach (var p in candidates)
+            {
+                if (p is null || !File.Exists(p)) continue;
+                foreach (var raw in File.ReadAllLines(p))
+                {
+                    var line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith('#')) continue;
+                    var idx = line.IndexOf('=');
+                    if (idx <= 0) continue;
+                    var k = line[..idx].Trim();
+                    var v = line[(idx + 1)..].Trim().Trim('"');
+                    if (string.Equals(k, key, StringComparison.OrdinalIgnoreCase)) return v;
+                }
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static string? FindFileUpwards(string startDir, string fileName)
+    {
+        var dir = new DirectoryInfo(startDir);
+        while (dir != null)
+        {
+            var candidate = Path.Combine(dir.FullName, fileName);
+            if (File.Exists(candidate)) return candidate;
+
+            var parent = dir.Parent;
+            if (parent is null) break;
+            dir = parent;
+        }
+        return null;
     }
 }
