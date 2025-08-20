@@ -157,34 +157,71 @@ public static class Program
     {
         try
         {
-            var cwd = Directory.GetCurrentDirectory();
-            var candidates = new List<string?>
+            foreach (var path in GetEnvFileCandidates())
             {
-                FindFileUpwards(cwd, ".env"),
-                FindFileUpwards(AppContext.BaseDirectory, ".env"),
-                Path.Combine(cwd, "samples", "ClientSample", ".env"),
-                FindFileUpwards(cwd, ".env.example"),
-                FindFileUpwards(AppContext.BaseDirectory, ".env.example"),
-                Path.Combine(cwd, "samples", "ClientSample", ".env.example")
-            };
-
-            foreach (var p in candidates)
-            {
-                if (p is null || !File.Exists(p)) continue;
-                foreach (var raw in File.ReadAllLines(p))
-                {
-                    var line = raw.Trim();
-                    if (line.Length == 0 || line.StartsWith('#')) continue;
-                    var idx = line.IndexOf('=');
-                    if (idx <= 0) continue;
-                    var k = line[..idx].Trim();
-                    var v = line[(idx + 1)..].Trim().Trim('"');
-                    if (string.Equals(k, key, StringComparison.OrdinalIgnoreCase)) return v;
-                }
+                var value = GetEnvValueFromFile(path, key);
+                if (!string.IsNullOrEmpty(value)) return value;
             }
         }
-        catch { }
+        catch
+        {
+            // ignore errors reading .env files
+        }
         return null;
+    }
+
+    // Build and yield existing candidate .env file paths
+    private static IEnumerable<string> GetEnvFileCandidates()
+    {
+        var cwd = Directory.GetCurrentDirectory();
+        var candidates = new string?[]
+        {
+            FindFileUpwards(cwd, ".env"),
+            FindFileUpwards(AppContext.BaseDirectory, ".env"),
+            Path.Combine(cwd, "samples", "ClientSample", ".env"),
+            FindFileUpwards(cwd, ".env.example"),
+            FindFileUpwards(AppContext.BaseDirectory, ".env.example"),
+            Path.Combine(cwd, "samples", "ClientSample", ".env.example")
+        };
+
+        foreach (var p in candidates)
+        {
+            if (!string.IsNullOrEmpty(p) && File.Exists(p))
+                yield return p!;
+        }
+    }
+
+    // Try to read a specific key from a given .env file
+    private static string? GetEnvValueFromFile(string path, string key)
+    {
+        foreach (var raw in File.ReadLines(path))
+        {
+            if (TryParseEnvLine(raw, out var k, out var v) &&
+                string.Equals(k, key, StringComparison.OrdinalIgnoreCase))
+            {
+                return v;
+            }
+        }
+        return null;
+    }
+
+    // Parse a .env line into key/value
+    private static bool TryParseEnvLine(string line, out string key, out string value)
+    {
+        key = string.Empty;
+        value = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(line)) return false;
+
+        var trimmed = line.Trim();
+        if (trimmed.Length == 0 || trimmed.StartsWith('#')) return false;
+
+        var idx = trimmed.IndexOf('=');
+        if (idx <= 0) return false;
+
+        key = trimmed[..idx].Trim();
+        value = trimmed[(idx + 1)..].Trim().Trim('"');
+        return key.Length > 0;
     }
 
     private static string? FindFileUpwards(string startDir, string fileName)

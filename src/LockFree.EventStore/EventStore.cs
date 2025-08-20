@@ -953,7 +953,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Aggregates events grouped by a key with a filter function.
     /// </summary>
-    public Dictionary<TKey, TAcc> AggregateBy<TKey, TAcc>(Func<TEvent, TKey> groupBy, Func<TAcc> seed, Func<TAcc, TEvent, TAcc> fold, Func<TEvent, bool> filter, DateTime? from = null, DateTime? to = null)
+    public Dictionary<TKey, TAcc> AggregateBy<TKey, TAcc>(Func<TEvent, TKey> groupBy, Func<TAcc> seed, Func<TAcc, TEvent, TAcc> fold, Func<TEvent, bool> filter, DateTime? from, DateTime? to)
         where TKey : notnull
     {
         return AggregateBy(groupBy, seed, fold, filter != null ? new Predicate<TEvent>(filter) : null, from, to);
@@ -995,32 +995,44 @@ public sealed class EventStore<TEvent>
     private WindowAggregateState AggregateWindowForPartition(int index, long fromTicks, long toTicks, Predicate<TEvent>? filter)
     {
         var state = new WindowAggregateState();
-        foreach (var item in EnumeratePartitionSnapshot(index).Where(item =>
+
+        var tsSel = _ts;
+        if (tsSel == null)
+            return state;
+
+        foreach (var item in EnumeratePartitionSnapshot(index))
         {
-            var tsSel = _ts;
-            if (tsSel == null) return false;
             var itemTicks = tsSel.GetTimestamp(item).Ticks;
-            if (itemTicks < fromTicks || itemTicks > toTicks || filter?.Invoke(item) == false) return false;
-            return true;
-        }))
-        {
+            if (itemTicks < fromTicks || itemTicks > toTicks)
+                continue;
+
+            if (filter?.Invoke(item) == false)
+                continue;
+
             state.Count++;
+
             if (TryExtractNumericValue(item, out double value))
             {
-                state.Sum += value;
-                if (state.Count == 1)
-                {
-                    state.Min = value;
-                    state.Max = value;
-                }
-                else
-                {
-                    if (value < state.Min) state.Min = value;
-                    if (value > state.Max) state.Max = value;
-                }
+                UpdateAggregateState(ref state, value);
             }
         }
         return state;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void UpdateAggregateState(ref WindowAggregateState state, double value)
+    {
+        state.Sum += value;
+        if (state.Count == 1)
+        {
+            state.Min = value;
+            state.Max = value;
+        }
+        else
+        {
+            if (value < state.Min) state.Min = value;
+            if (value > state.Max) state.Max = value;
+        }
     }
 
     /// <summary>
