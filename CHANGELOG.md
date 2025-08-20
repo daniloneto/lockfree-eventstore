@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.6 - 2025-08-20
+### Added
+- Refactor for sonarqube
+- Arquivos .env e .env.example nos samples (ClientSample e GatewayClient)
+
+### Changed
+- Refatoração da estrutura de código para melhor legibilidade e manutenção
+- Ajustes nos samples para configuração via variáveis de ambiente
+- Documentação: README traduzido para inglês
+
 ### Features
 - Enhance telemetry with statistics tracking and callback support
 - Add anti-false sharing protection and improve performance
