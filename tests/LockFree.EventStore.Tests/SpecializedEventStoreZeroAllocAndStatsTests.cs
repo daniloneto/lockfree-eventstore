@@ -28,6 +28,8 @@ public class SpecializedEventStoreZeroAllocAndStatsTests
         store.SnapshotZeroAlloc(span => chunks.Add(Values(span)), chunkSize: 3);
 
         Assert.True(chunks.Count >= 7); // 3+3+3+3+3+3+2 (order across partitions not guaranteed)
+        // Assert chunk-size contract: each produced chunk is non-empty and <= requested chunkSize
+        Assert.All(chunks, c => Assert.InRange(c.Length, 1, 3));
         Assert.Equal(20, chunks.Sum(c => c.Length));
     }
 
@@ -38,9 +40,20 @@ public class SpecializedEventStoreZeroAllocAndStatsTests
         var t0 = new DateTime(2024, 1, 1).Ticks;
         for (int i = 0; i < 12; i++) store.Add(E(i % 3, i, t0 + i));
 
+        var chunkLens = new List<int>();
         var total = 0;
-        store.EnumerateSnapshotZeroAlloc(span => total += span.Length, chunkSize: 4);
+        int maxChunk = 0;
+        store.EnumerateSnapshotZeroAlloc(span =>
+        {
+            var len = span.Length;
+            chunkLens.Add(len);
+            total += len;
+            if (len > maxChunk) maxChunk = len;
+        }, chunkSize: 4);
         Assert.Equal(12, total);
+        // Assert chunk-size contract: each produced chunk is non-empty and <= requested chunkSize
+        Assert.All(chunkLens, n => Assert.InRange(n, 1, 4));
+        Assert.InRange(maxChunk, 1, 4);
     }
 
     [Fact]

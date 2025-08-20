@@ -15,11 +15,12 @@ public class PartitionersTests
         Assert.InRange(p1, 0, 7);
     }
 
-    [Fact]
-    public void ForKey_Throws_When_Partitions_Invalid()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ForKey_Throws_When_Partitions_Invalid(int partitions)
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => Partitioners.ForKey("x", 0));
-        Assert.Throws<ArgumentOutOfRangeException>(() => Partitioners.ForKey("x", -1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Partitioners.ForKey("x", partitions));
     }
 
     [Fact]
@@ -30,16 +31,43 @@ public class PartitionersTests
         var pSimple = Partitioners.ForKeyIdSimple(key, 16);
         Assert.InRange(pFast, 0, 15);
         Assert.InRange(pSimple, 0, 15);
+        Assert.Equal(pFast, pSimple);
+
+        // Also validate a non-power-of-two partition count
+        var pFast10 = Partitioners.ForKeyId(key, 10);
+        var pSimple10 = Partitioners.ForKeyIdSimple(key, 10);
+        Assert.InRange(pFast10, 0, 9);
+        Assert.InRange(pSimple10, 0, 9);
+        Assert.Equal(pFast10, pSimple10);
 
         // Distribution sanity: same input, same partitions
         Assert.Equal(Partitioners.ForKeyId(key, 16), Partitioners.ForKeyId(key, 16));
         Assert.Equal(Partitioners.ForKeyIdSimple(key, 16), Partitioners.ForKeyIdSimple(key, 16));
     }
 
-    [Fact]
-    public void ForKeyId_Throws_When_Partitions_Invalid()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void ForKeyId_Throws_When_Partitions_Invalid(int partitions)
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => Partitioners.ForKeyId(new KeyId(1), 0));
-        Assert.Throws<ArgumentOutOfRangeException>(() => Partitioners.ForKeyIdSimple(new KeyId(1), 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Partitioners.ForKeyId(new KeyId(1), partitions));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Partitioners.ForKeyIdSimple(new KeyId(1), partitions));
+    }
+
+    [Fact]
+    public void Partitions_One_Always_Maps_To_Zero()
+    {
+        // For key-based partitioning
+        Assert.Equal(0, Partitioners.ForKey("alpha", 1));
+        Assert.Equal(0, Partitioners.ForKey("beta", 1));
+        Assert.Equal(0, Partitioners.ForKey(string.Empty, 1));
+
+        // For KeyId-based partitioning (both fast and simple)
+        var k0 = new KeyId(0);
+        var k1 = new KeyId(123);
+        Assert.Equal(0, Partitioners.ForKeyId(k0, 1));
+        Assert.Equal(0, Partitioners.ForKeyId(k1, 1));
+        Assert.Equal(0, Partitioners.ForKeyIdSimple(k0, 1));
+        Assert.Equal(0, Partitioners.ForKeyIdSimple(k1, 1));
     }
 }

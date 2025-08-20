@@ -261,7 +261,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Gets all registered key mappings (for debugging/monitoring).
     /// </summary>
-    public IReadOnlyDictionary<string, KeyId> GetKeyMappings() => _keyMap.GetAllMappings();    
+    public IReadOnlyDictionary<string, KeyId> GetKeyMappings() => _keyMap.GetAllMappings();
     /// <summary>
     /// Internal discard callback used to update statistics and invoke user-provided hooks.
     /// </summary>
@@ -1104,14 +1104,19 @@ public sealed class EventStore<TEvent>
         where TResult : struct, INumber<TResult>
     {
         var sum = TResult.Zero;
-        foreach (var item in EnumeratePartitionSnapshot(index).Where(item =>
+        var tsSel = _ts;
+        if (tsSel == null)
+            return sum;
+
+        foreach (var item in EnumeratePartitionSnapshot(index))
         {
-            var tsSel = _ts;
-            if (tsSel == null) return false;
             var itemTicks = tsSel.GetTimestamp(item).Ticks;
-            return itemTicks >= fromTicks && itemTicks <= toTicks && filter?.Invoke(item) != false;
-        }))
-        {
+            if (itemTicks < fromTicks || itemTicks > toTicks)
+                continue;
+
+            if (filter?.Invoke(item) == false)
+                continue;
+
             sum += selector(item);
         }
         return sum;
@@ -1167,13 +1172,14 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void ForEachEventInRange(int index, long fromTicks, long toTicks, Action<TEvent> action)
     {
-        foreach (var item in EnumeratePartitionSnapshot(index).Where(item =>
+        var tsSel = _ts;
+        if (tsSel == null) return;
+
+        foreach (var item in EnumeratePartitionSnapshot(index))
         {
-            if (_ts == null) return false;
-            var itemTicks = _ts.GetTimestamp(item).Ticks;
-            return itemTicks >= fromTicks && itemTicks <= toTicks;
-        }))
-        {
+            var itemTicks = tsSel.GetTimestamp(item).Ticks;
+            if (itemTicks < fromTicks || itemTicks > toTicks)
+                continue;
             action(item);
         }
     }
@@ -1416,14 +1422,24 @@ public sealed class EventStore<TEvent>
     private void ProcessPaddedPartitionSnapshot(int index, Action<ReadOnlySpan<TEvent>> processor, int chunkSize)
     {
         var partition = _paddedPartitions![index];
-        var tempBuffer = new TEvent[partition.Capacity];
-        var len = partition.Snapshot(tempBuffer);
-        for (int j = 0; j < len; j += chunkSize)
+        var pool = ArrayPool<TEvent>.Shared;
+        var tempBuffer = pool.Rent(partition.Capacity);
+        int len = 0;
+        try
         {
-            var chunkLen = Math.Min(chunkSize, len - j);
-            var chunk = tempBuffer.AsSpan(j, chunkLen);
-            IncrementSnapshotBytesExposed((long)chunkLen * sizeof(long)); // conservative
-            processor(chunk);
+            len = partition.Snapshot(tempBuffer);
+            for (int j = 0; j < len; j += chunkSize)
+            {
+                var chunkLen = Math.Min(chunkSize, len - j);
+                var chunk = new ReadOnlySpan<TEvent>(tempBuffer, j, chunkLen);
+                IncrementSnapshotBytesExposed((long)chunkLen * sizeof(long)); // conservative
+                processor(chunk);
+            }
+        }
+        finally
+        {
+            // Conditionally clear to avoid retaining references when TEvent is a reference or contains references
+            pool.Return(tempBuffer, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<TEvent>());
         }
     }
 

@@ -30,7 +30,8 @@ public class TimestampSelectorsTests
     [Fact]
     public void Interface_Default_GetTimestampTicks_Is_Used()
     {
-        var ts = DateTime.UtcNow;
+        // Prefer deterministic timestamp over UtcNow to avoid rare flakiness
+        var ts = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
         var evt = new SimpleEvt(ts);
         var sel = new SimpleSelector();
         Assert.Equal(ts, sel.GetTimestamp(evt));

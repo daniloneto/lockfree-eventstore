@@ -110,7 +110,7 @@ public sealed class LockFreeEventRingBuffer
         for (int i = 0; i < batch.Length; i++)
         {
             var position = startTail - batch.Length + i;
-            _buffer[position % _capacity] = batch[i];
+            _buffer[(int)(position % _capacity)] = batch[i];
         }
         
         // Advance head if necessary to maintain ring buffer invariant

@@ -23,9 +23,22 @@ public class SpecializedEventStoreAdvancedTests
         var store = new SpecializedEventStore(capacity: 64, partitions: 4);
         var t0 = new DateTime(2024, 1, 1).Ticks;
 
+        // Validate partition mapping for the keys used to avoid cross-partition eviction assumptions
+        var partCount = store.Partitions;
+        var p0 = Partitioners.ForKeyIdSimple(new KeyId(0), partCount);
+        var p1 = Partitioners.ForKeyIdSimple(new KeyId(1), partCount);
+        var p2 = Partitioners.ForKeyIdSimple(new KeyId(2), partCount);
+        var p99 = Partitioners.ForKeyIdSimple(new KeyId(99), partCount);
+        Assert.Equal(4, partCount);
+        Assert.Equal(3, new HashSet<int> { p0, p1, p2 }.Count);
+        Assert.DoesNotContain(p99, new[] { p0, p1, p2 });
+
         // Span overload
         var arr = Enumerable.Range(0, 10).Select(i => E(i % 3, i, t0 + i)).ToArray();
         store.AddRange(arr.AsSpan());
+
+        // Snapshot per-partition counts before adding the 99-key batch
+        var before = store.GetPartitionStatistics().ToDictionary(s => s.PartitionIndex, s => s.Count);
 
         // IEnumerable overload forcing chunking path (not array or list)
         static IEnumerable<Event> Gen(long startTicks, int count)
@@ -34,6 +47,13 @@ public class SpecializedEventStoreAdvancedTests
         }
         // Use 16 to avoid overflowing a single partition (capacity per partition = 16)
         store.AddRange(Gen(t0 + 100, 16));
+
+        // Verify per-partition counts: only the 99-key partition increased by 16
+        var after = store.GetPartitionStatistics().ToDictionary(s => s.PartitionIndex, s => s.Count);
+        before.TryGetValue(p0, out var b0); after.TryGetValue(p0, out var a0); Assert.Equal(b0, a0);
+        before.TryGetValue(p1, out var b1); after.TryGetValue(p1, out var a1); Assert.Equal(b1, a1);
+        before.TryGetValue(p2, out var b2); after.TryGetValue(p2, out var a2); Assert.Equal(b2, a2);
+        before.TryGetValue(p99, out var b99); after.TryGetValue(p99, out var a99); Assert.Equal(b99 + 16, a99);
 
         Assert.Equal(26, store.CountApprox);
         Assert.False(store.IsEmpty);
@@ -79,11 +99,19 @@ public class SpecializedEventStoreAdvancedTests
         store.QueryZeroAlloc(span => chunks.Add(ValuesFrom(span)), chunkSize: 5);
         Assert.True(chunks.Count >= 3); // e.g., 5,5,2 chunks
         Assert.Equal(12, chunks.Sum(c => c.Length));
+        // Lock in chunk-size contract: each chunk non-empty and <= chunkSize
+        Assert.All(chunks, c => Assert.InRange(c.Length, 1, 5));
+        var maxLen = chunks.Max(c => c.Length);
+        Assert.InRange(maxLen, 1, 5);
 
         chunks.Clear();
         store.QueryByKeyZeroAlloc(new KeyId(1), span => chunks.Add(ValuesFrom(span)),
             from: new DateTime(t0 + 4), to: new DateTime(t0 + 9), chunkSize: 3);
         Assert.Equal(new[] { 4d, 5d, 6d, 7d, 8d, 9d }, chunks.SelectMany(x => x).ToArray());
+        // Lock in chunk-size contract for ByKey path as well
+        Assert.All(chunks, c => Assert.InRange(c.Length, 1, 3));
+        var maxLen2 = chunks.Max(c => c.Length);
+        Assert.InRange(maxLen2, 1, 3);
     }
 
     [Fact]
