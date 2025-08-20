@@ -47,7 +47,10 @@ public static class EventBatchOperations
     }
     
     /// <summary>
-    /// Finds events within a time range.
+    /// Filters events with timestamps in the inclusive range [fromTicks, toTicks].
+    /// Writes up to <paramref name="output"/>.Length matching events into <paramref name="output"/> in the same order as they appear in <paramref name="events"/>.
+    /// If more matches exist than the capacity of <paramref name="output"/>, the method truncates (clamps) to capacity and returns the number written.
+    /// This method does not allocate and stops scanning early if the output buffer becomes full.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int FilterByTimeRange(ReadOnlySpan<Event> events, long fromTicks, long toTicks, Span<Event> output)
@@ -71,7 +74,8 @@ public static class EventBatchOperations
     }
     
     /// <summary>
-    /// Gets the first and last timestamp from a span of events.
+    /// Gets the first and last timestamp from a span of events without sorting.
+    /// Returns (0, 0) for an empty span. This reflects the timestamps of events[0] and events[^1].
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static (long firstTicks, long lastTicks) GetTimeRange(ReadOnlySpan<Event> events)

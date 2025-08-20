@@ -1,28 +1,38 @@
 # Changelog
 
-## 1.0.3 - 2025-08-10
+## 1.0.6 - 2025-08-20
 ### Added
-- Endpoints genéricos de streams (/streams/{*stream} POST/GET, agregação via ?aggregate=true)
-- Campo durationMs nas respostas de agregação
-- Endpoints administrativos /admin/clear, /admin/reset, /admin/purge
-- Sample GatewayClient com endpoints /orders, /orders/bulk, /stats/local, /stats/global
-- docker-compose com serviço escalável de gateway e servidor central
-- Configuração Nginx para balanceamento (least_conn + resolução dinâmica)
-- Script de cenário run-gateway-scenario.ps1
-- Dockerfiles multi-stage (server e gateway)
-- Dependência Ulid para geração de IDs
+- Refactor for SonarQube
+- .env and .env.example files in samples (ClientSample and GatewayClient)
 
 ### Changed
-- Ajuste rota agregação: uso de query ?aggregate=true (catch-all de streams)
-- Melhorias README (em andamento) e estrutura de samples
+- Refactoring of code structure for better readability and maintainability
+- Adjustments in samples for configuration via environment variables
+- Documentation: README translated to English
+
+## 1.0.3 - 2025-08-10
+### Added
+- Generic stream endpoints (/streams/{*stream} POST/GET, aggregation via ?aggregate=true)
+- durationMs field in aggregation responses
+- Administrative endpoints /admin/clear, /admin/reset, /admin/purge
+- GatewayClient sample with endpoints /orders, /orders/bulk, /stats/local, /stats/global
+- docker-compose with scalable gateway service and central server
+- Nginx configuration for load balancing (least_conn + dynamic resolution)
+- Scenario script run-gateway-scenario.ps1
+- Multi-stage Dockerfiles (server and gateway)
+- Ulid dependency for ID generation
+
+### Changed
+- Aggregation route adjustment: use of query ?aggregate=true (catch-all for streams)
+- README improvements (in progress) and sample structure
 
 ### Fixed
-- Suporte a nomes de stream com barra (catch-all)
-- 500 em agregação devido a rota anterior inválida
-- Avisos de documentação XML marcando tipos sample como internal
+- Support for stream names with slashes (catch-all)
+- 500 error in aggregation due to previous invalid route
+- XML documentation warnings marking sample types as internal
 
 ## 1.0.1 / 1.0.2
-- Metadados e exemplos atualizados, melhorias de README
+- Updated metadata and examples, README improvements
 
 ### Features
 - Enhance telemetry with statistics tracking and callback support
@@ -44,4 +54,4 @@
 - release 1.0
 
 ## 0.1.0
-- Implementação inicial com ring buffer lock-free, particionamento e agregações.
+- Initial implementation with lock-free ring buffer, partitioning, and aggregations.
