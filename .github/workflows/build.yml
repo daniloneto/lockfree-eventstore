@@ -42,7 +42,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         shell: powershell
         run: |
-          .\.sonar\scanner\dotnet-sonarscanner begin /k:"daniloneto_lockfree-eventstore" /o:"daniloneto" /d:sonar.token="${{ secrets.SONAR_TOKEN }}"  /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml"
+          .\.sonar\scanner\dotnet-sonarscanner begin /k:"daniloneto_lockfree-eventstore" /o:"daniloneto" /d:sonar.token="$env:SONAR_TOKEN"  /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml"
           dotnet build -c Release
           dotnet test tests/LockFree.EventStore.Tests/LockFree.EventStore.Tests.csproj -c Release --no-build /p:CollectCoverage=true /p:CoverletOutputFormat=opencover /p:CoverletOutput=TestResults/coverage/
-          .\.sonar\scanner\dotnet-sonarscanner end /d:sonar.token="${{ secrets.SONAR_TOKEN }}"
+          .\.sonar\scanner\dotnet-sonarscanner end /d:sonar.token="$env:SONAR_TOKEN"
