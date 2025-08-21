@@ -1,6 +1,6 @@
 # <img src="https://raw.githubusercontent.com/daniloneto/lockfree-eventstore/refs/heads/main/lockfreeeventstore.png" />
 [![CI](https://github.com/daniloneto/lockfree-eventstore/actions/workflows/ci.yml/badge.svg)](https://github.com/daniloneto/lockfree-eventstore/actions)
-[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.Event.Store)
+[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.EventStore)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=daniloneto_lockfree-eventstore&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=daniloneto_lockfree-eventstore)
 #
 **Um banco de eventos em memória, rodando como serviço, para sincronizar e validar operações entre múltiplas instâncias com alta concorrência e sem travas.**
