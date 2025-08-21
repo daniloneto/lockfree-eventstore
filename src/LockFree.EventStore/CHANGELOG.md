@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.0.8 - 2025-08-21
+
+New Features
+
+Batch append operations and filtered snapshots with per-partition snapshot views.
+Factory helpers to quickly create optimized event stores.
+Specialized store gains string-key add/query and zero-allocation APIs.
+Metrics Dashboard reorganized with explicit startup, health endpoint, expanded metrics and streams routes, and consolidated admin actions.
+Client sample introduces a MetricEvent type.
+Chores
+
+Added SonarScanner tool and ignores for its artifacts.
+Refactor
+
+Standardized argument validation and reorganized route mapping.
+Tests
+
+Centralized test expectations and enabled MSBuild-based coverage.
+
+Tests
+Added comprehensive unit tests expanding coverage across event store statistics, key/id mapping, lock-free ring buffers, optimized partitions (AoS/SoA), padded ring buffers, and store statistics.
+Validates construction edge cases, capacity handling, enqueue/discard behavior, window/view creation (including wrap-around), zero-allocation paths, snapshots (partial and full), ordering, and epoch/state tracking.
+Confirms value semantics, bidirectional mappings, and formatted outputs.
+Improves reliability by exercising normal and boundary scenarios without changing public APIs.
+
+
+## 1.0.7 - 2025-08-20
+
+New Features
+
+Richer analytics: batch appends, key-id hot-paths, and time-windowed queries/aggregations.
+Samples
+
+Samples now include .env/.env.example and read EVENTSTORE_URL from environment; HTTP clients use DI.
+Documentation
+
+README translated to English; CHANGELOG updated for release 1.0.6 (2025-08-20).
+Refactor
+
+Code reorganized for readability, maintainability and SonarQube.
+Tests
+
+Large expansion of unit tests covering windowing, zero-allocation paths, ring buffers, partitions and helpers.
+Chores
+
+Added code-coverage and tooling configuration.
+
 ## 1.0.6 - 2025-08-20
 ### Added
 - Refactor for SonarQube
