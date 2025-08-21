@@ -20,9 +20,8 @@ public sealed class PaddedLockFreeRingBuffer<T>
     /// </summary>
     public PaddedLockFreeRingBuffer(int capacity, Action<T>? onItemDiscarded = null)
     {
-        if (capacity <= 0)
-            throw new ArgumentOutOfRangeException(nameof(capacity));
-            
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
+        
         _buffer = new T[capacity];
         _onItemDiscarded = onItemDiscarded;
         _header = new PartitionHeader(capacity);
@@ -276,8 +275,7 @@ public sealed class PaddedLockFreeRingBuffer<T>
         long toTicks, 
         IEventTimestampSelector<T> timestampSelector)
     {
-        if (timestampSelector == null)
-            throw new ArgumentNullException(nameof(timestampSelector));
+        ArgumentNullException.ThrowIfNull(timestampSelector);
             
         const int maxRetries = 10;
         

@@ -33,7 +33,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Initializes a new instance with default options.
     /// </summary>
-    public EventStore() : this(null) { }
+    public EventStore() : this(new EventStoreOptions<TEvent>()) { }
 
     /// <summary>
     /// Initializes a new instance with specified capacity.
@@ -53,11 +53,11 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Initializes a new instance with the provided options.
     /// </summary>
-    public EventStore(EventStoreOptions<TEvent>? options = null)
+    public EventStore(EventStoreOptions<TEvent>? options)
     {
         _options = options ?? new EventStoreOptions<TEvent>();
         if (_options.Partitions <= 0)
-            throw new ArgumentOutOfRangeException(nameof(_options.Partitions));
+            throw new ArgumentOutOfRangeException(nameof(options), "Partitions must be greater than zero.");
         _statistics = new EventStoreStatistics();
         _keyMap = new KeyMap();
         _usePadding = _options.EnableFalseSharingProtection;
@@ -432,9 +432,169 @@ public sealed class EventStore<TEvent>
                 written++;
         }
         return written;
-    }    /// <summary>
-         /// Clears all events from the store.
-         /// </summary>
+    }
+
+    /// <summary>
+    /// High-performance batch append using optimized ring buffer operations.
+    /// This version uses the optimized TryEnqueueBatch method for better performance.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int TryAppendBatch(ReadOnlySpan<TEvent> batch)
+    {
+        if (batch.IsEmpty) return 0;
+
+        if (IsSmallBatch(batch))
+        {
+            return AppendSmallBatch(batch);
+        }
+
+        var partitionCount = GetPartitionCount();
+        var partitionCounts = new int[partitionCount];
+        CountEventsPerPartition(batch, partitionCount, partitionCounts);
+
+        var partitionArrays = AllocatePartitionArrays(partitionCounts);
+        DistributeEventsToPartitions(batch, partitionCount, partitionArrays, partitionCounts);
+
+        return AppendPartitionBatches(partitionArrays, partitionCounts);
+    }
+
+    /// <summary>
+    /// Optimized batch append for single partition scenarios.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int TryAppendBatch(ReadOnlySpan<TEvent> batch, int partition)
+    {
+        if ((uint)partition >= (uint)GetPartitionCount())
+        {
+            throw new ArgumentOutOfRangeException(nameof(partition));
+        }
+        var written = TryEnqueueBatchToPartition(partition, batch);
+        // Update statistics
+        for (int i = 0; i < written; i++)
+        {
+            _statistics.RecordAppend();
+        }
+
+        // Update telemetry counter for successful appends
+        IncrementAppendCount(written);
+
+        return written;
+    }
+
+    /// <summary>
+    /// Returns true when the batch is small enough to use the per-item append path.
+    /// </summary>
+    /// <param name="batch">Batch of events to check.</param>
+    /// <returns>True if the batch length is less than or equal to the small batch threshold.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsSmallBatch(ReadOnlySpan<TEvent> batch) => batch.Length <= 32;
+
+    /// <summary>
+    /// Appends a small batch using the standard per-item append path.
+    /// </summary>
+    /// <param name="batch">The batch of events to append.</param>
+    /// <returns>The number of events successfully appended.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int AppendSmallBatch(ReadOnlySpan<TEvent> batch)
+    {
+        int totalWritten = 0;
+        foreach (var e in batch)
+        {
+            if (TryAppend(e))
+                totalWritten++;
+        }
+        return totalWritten;
+    }
+
+    /// <summary>
+    /// Counts how many events in the batch map to each partition.
+    /// </summary>
+    /// <param name="batch">The batch of events to analyze.</param>
+    /// <param name="partitionCount">The total number of partitions.</param>
+    /// <param name="partitionCounts">Output array to fill with counts per partition.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CountEventsPerPartition(ReadOnlySpan<TEvent> batch, int partitionCount, int[] partitionCounts)
+    {
+        foreach (var e in batch)
+        {
+            var partition = Partitioners.ForKey(e, partitionCount);
+            partitionCounts[partition]++;
+        }
+    }
+
+    /// <summary>
+    /// Allocates per-partition arrays sized to the provided counts.
+    /// </summary>
+    /// <param name="partitionCounts">The number of elements per partition.</param>
+    /// <returns>An array of arrays, one per partition, sized according to the counts.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TEvent[][] AllocatePartitionArrays(int[] partitionCounts)
+    {
+        var partitionArrays = new TEvent[partitionCounts.Length][];
+        for (int i = 0; i < partitionCounts.Length; i++)
+        {
+            if (partitionCounts[i] > 0)
+            {
+                partitionArrays[i] = new TEvent[partitionCounts[i]];
+            }
+        }
+        return partitionArrays;
+    }
+
+    /// <summary>
+    /// Distributes events from the batch into preallocated per-partition arrays.
+    /// </summary>
+    /// <param name="batch">The batch of events to distribute.</param>
+    /// <param name="partitionCount">Total number of partitions.</param>
+    /// <param name="partitionArrays">Destination arrays, one per partition.</param>
+    /// <param name="partitionCounts">Mutable index counters per partition (will be updated).</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void DistributeEventsToPartitions(ReadOnlySpan<TEvent> batch, int partitionCount, TEvent[][] partitionArrays, int[] partitionCounts)
+    {
+        Array.Clear(partitionCounts, 0, partitionCounts.Length);
+        foreach (var e in batch)
+        {
+            var partition = Partitioners.ForKey(e, partitionCount);
+            var target = partitionArrays[partition];
+            if (target != null)
+            {
+                target[partitionCounts[partition]++] = e;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Appends per-partition batches to their respective partitions and updates statistics.
+    /// </summary>
+    /// <param name="partitionArrays">Arrays containing items destined for each partition.</param>
+    /// <param name="partitionCounts">Number of items in each partition array.</param>
+    /// <returns>Total number of events appended across partitions.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int AppendPartitionBatches(TEvent[][] partitionArrays, int[] partitionCounts)
+    {
+        int totalWritten = 0;
+        for (int i = 0; i < partitionArrays.Length; i++)
+        {
+            var items = partitionArrays[i];
+            if (items == null || partitionCounts[i] == 0)
+                continue;
+
+            var written = TryEnqueueBatchToPartition(i, items);
+            totalWritten += written;
+
+            // Update statistics and telemetry for the number of successfully appended items
+            for (int j = 0; j < written; j++)
+            {
+                _statistics.RecordAppend();
+            }
+            IncrementAppendCount(written);
+        }
+        return totalWritten;
+    }
+
+    /// <summary>
+    /// Clears all events from the store.
+    /// </summary>
     public void Clear()
     {
         var partitionCount = GetPartitionCount();
@@ -460,11 +620,13 @@ public sealed class EventStore<TEvent>
     public void Reset()
     {
         Clear();
-    }    /// <summary>
-         /// Purges events older than the specified timestamp.
-         /// Requires a TimestampSelector to be configured.
-         /// Uses pooled buffers to minimize allocations during purge.
-         /// </summary>
+    }
+
+    /// <summary>
+    /// Purges events older than the specified timestamp.
+    /// Requires a TimestampSelector to be configured.
+    /// Uses pooled buffers to minimize allocations during purge.
+    /// </summary>
     public void Purge(DateTime olderThan)
     {
         if (_ts == null)
@@ -566,6 +728,17 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
+    /// Takes a filtered snapshot of all partitions and returns an immutable list containing only events matching the filter.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public IReadOnlyList<TEvent> Snapshot(Func<TEvent, bool> filter)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        // Reuse the existing query pipeline and materialize the results.
+        return Query(filter).ToArray();
+    }
+
+    /// <summary>
     /// Computes the total length of all partitions and fills the partitionLengths array.
     /// </summary>
     /// <param name="partitionCount">The number of partitions.</param>
@@ -617,7 +790,7 @@ public sealed class EventStore<TEvent>
     /// <param name="idx">The total number of copied events.</param>
     /// <returns>A read-only list of the copied events.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private IReadOnlyList<TEvent> FinalizeSnapshotResult(TEvent[] result, int idx)
+    private TEvent[] FinalizeSnapshotResult(TEvent[] result, int idx)
     {
         if (idx < result.Length)
         {
@@ -631,10 +804,12 @@ public sealed class EventStore<TEvent>
             IncrementSnapshotBytesExposed((long)result.Length * sizeof(long));
             return result;
         }
-    }    /// <summary>
-         /// Creates zero-allocation views of all partition contents.
-         /// Returns ReadOnlyMemory segments that reference the underlying buffer without copying data.
-         /// </summary>
+    }
+
+    /// <summary>
+    /// Creates zero-allocation views of all partition contents.
+    /// Returns ReadOnlyMemory segments that reference the underlying buffer without copying data.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public IReadOnlyList<PartitionView<TEvent>> SnapshotViews()
     {
@@ -644,12 +819,14 @@ public sealed class EventStore<TEvent>
             .ToArray();
 
         return views;
-    }    /// <summary>
-         /// Creates zero-allocation views of partition contents filtered by timestamp range.
-         /// Requires a TimestampSelector to be configured.
-         /// </summary>
+    }
+
+    /// <summary>
+    /// Creates zero-allocation views of partition contents filtered by timestamp range.
+    /// Requires a TimestampSelector to be configured.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public IReadOnlyList<PartitionView<TEvent>> SnapshotViews(DateTime? from = null, DateTime? to = null)
+    public IReadOnlyList<PartitionView<TEvent>> SnapshotViews(DateTime? from, DateTime? to)
     {
         if (_ts == null)
             throw new InvalidOperationException("TimestampSelector must be configured to use timestamp filtering.");
@@ -663,30 +840,6 @@ public sealed class EventStore<TEvent>
             .ToArray();
 
         return views;
-    }
-
-    /// <summary>
-    /// Takes a snapshot of events within the specified time window.
-    /// </summary>
-    public IReadOnlyList<TEvent> Snapshot(DateTime? from = null, DateTime? to = null)
-    {
-        return Query(from: from, to: to).ToList();
-    }
-
-    /// <summary>
-    /// Takes a filtered snapshot within the specified time window.
-    /// </summary>
-    public IReadOnlyList<TEvent> Snapshot(Func<TEvent, bool> filter, DateTime? from, DateTime? to)
-    {
-        return Query(filter, from, to).ToList();
-    }
-
-    /// <summary>
-    /// Takes a filtered snapshot across the entire time range.
-    /// </summary>
-    public IReadOnlyList<TEvent> Snapshot(Func<TEvent, bool> filter)
-    {
-        return Query(new Predicate<TEvent>(filter), null, null).ToList();
     }
 
     /// <summary>
@@ -716,10 +869,12 @@ public sealed class EventStore<TEvent>
         if ((from.HasValue && ts < from.Value) || (to.HasValue && ts > to.Value))
             return false;
         return true;
-    }    /// <summary>
-         /// Queries events by optional filter and time window.
-         /// Uses iterator pattern to avoid upfront allocations.
-         /// </summary>
+    }
+
+    /// <summary>
+    /// Queries events by optional filter and time window.
+    /// Uses iterator pattern to avoid upfront allocations.
+    /// </summary>
     public IEnumerable<TEvent> Query(Predicate<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
     {
         var partitionCount = GetPartitionCount();
@@ -926,9 +1081,11 @@ public sealed class EventStore<TEvent>
         where TResult : struct, IComparable<TResult>
     {
         return Max(selector, filter, null, null);
-    }    /// <summary>
-         /// Aggregates all events using the specified fold function.
-         /// </summary>
+    }
+
+    /// <summary>
+    /// Aggregates all events using the specified fold function.
+    /// </summary>
     public TAcc Aggregate<TAcc>(Func<TAcc> seed, Func<TAcc, TEvent, TAcc> fold, Predicate<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
     {
         var acc = seed();
@@ -991,10 +1148,12 @@ public sealed class EventStore<TEvent>
         where TKey : notnull
     {
         return AggregateBy(groupBy, seed, fold, new Predicate<TEvent>(filter), null, null);
-    }    /// <summary>
-         /// Performs window aggregation across all partitions without materializing intermediate collections.
-         /// Uses incremental aggregation to avoid scanning all events on each call.
-         /// </summary>
+    }
+
+    /// <summary>
+    /// Performs window aggregation across all partitions without materializing intermediate collections.
+    /// Uses incremental aggregation to avoid scanning all events on each call.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public WindowAggregateResult AggregateWindow(long fromTicks, long toTicks, Predicate<TEvent>? filter = null)
     {
@@ -1237,162 +1396,6 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
-    /// High-performance batch append using optimized ring buffer operations.
-    /// This version uses the optimized TryEnqueueBatch method for better performance.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public int TryAppendBatch(ReadOnlySpan<TEvent> batch)
-    {
-        if (batch.IsEmpty) return 0;
-
-        if (IsSmallBatch(batch))
-        {
-            return AppendSmallBatch(batch);
-        }
-
-        var partitionCount = GetPartitionCount();
-        var partitionCounts = new int[partitionCount];
-        CountEventsPerPartition(batch, partitionCount, partitionCounts);
-
-        var partitionArrays = AllocatePartitionArrays(partitionCounts);
-        DistributeEventsToPartitions(batch, partitionCount, partitionArrays, partitionCounts);
-
-        return AppendPartitionBatches(partitionArrays, partitionCounts);
-    }
-
-    /// <summary>
-    /// Returns true when the batch is small enough to use the per-item append path.
-    /// </summary>
-    /// <param name="batch">Batch of events to check.</param>
-    /// <returns>True if the batch length is less than or equal to the small batch threshold.</returns>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool IsSmallBatch(ReadOnlySpan<TEvent> batch) => batch.Length <= 32;
-
-    /// <summary>
-    /// Appends a small batch using the standard per-item append path.
-    /// </summary>
-    /// <param name="batch">The batch of events to append.</param>
-    /// <returns>The number of events successfully appended.</returns>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int AppendSmallBatch(ReadOnlySpan<TEvent> batch)
-    {
-        int totalWritten = 0;
-        foreach (var e in batch)
-        {
-            if (TryAppend(e))
-                totalWritten++;
-        }
-        return totalWritten;
-    }
-
-    /// <summary>
-    /// Counts how many events in the batch map to each partition.
-    /// </summary>
-    /// <param name="batch">The batch of events to analyze.</param>
-    /// <param name="partitionCount">The total number of partitions.</param>
-    /// <param name="partitionCounts">Output array to fill with counts per partition.</param>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void CountEventsPerPartition(ReadOnlySpan<TEvent> batch, int partitionCount, int[] partitionCounts)
-    {
-        foreach (var e in batch)
-        {
-            var partition = Partitioners.ForKey(e, partitionCount);
-            partitionCounts[partition]++;
-        }
-    }
-
-    /// <summary>
-    /// Allocates per-partition arrays sized to the provided counts.
-    /// </summary>
-    /// <param name="partitionCounts">The number of elements per partition.</param>
-    /// <returns>An array of arrays, one per partition, sized according to the counts.</returns>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static TEvent[][] AllocatePartitionArrays(int[] partitionCounts)
-    {
-        var partitionArrays = new TEvent[partitionCounts.Length][];
-        for (int i = 0; i < partitionCounts.Length; i++)
-        {
-            if (partitionCounts[i] > 0)
-            {
-                partitionArrays[i] = new TEvent[partitionCounts[i]];
-            }
-        }
-        return partitionArrays;
-    }
-
-    /// <summary>
-    /// Distributes events from the batch into preallocated per-partition arrays.
-    /// </summary>
-    /// <param name="batch">The batch of events to distribute.</param>
-    /// <param name="partitionCount">Total number of partitions.</param>
-    /// <param name="partitionArrays">Destination arrays, one per partition.</param>
-    /// <param name="partitionCounts">Mutable index counters per partition (will be updated).</param>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void DistributeEventsToPartitions(ReadOnlySpan<TEvent> batch, int partitionCount, TEvent[][] partitionArrays, int[] partitionCounts)
-    {
-        Array.Clear(partitionCounts, 0, partitionCounts.Length);
-        foreach (var e in batch)
-        {
-            var partition = Partitioners.ForKey(e, partitionCount);
-            var target = partitionArrays[partition];
-            if (target != null)
-            {
-                target[partitionCounts[partition]++] = e;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Appends per-partition batches to their respective partitions and updates statistics.
-    /// </summary>
-    /// <param name="partitionArrays">Arrays containing items destined for each partition.</param>
-    /// <param name="partitionCounts">Number of items in each partition array.</param>
-    /// <returns>Total number of events appended across partitions.</returns>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int AppendPartitionBatches(TEvent[][] partitionArrays, int[] partitionCounts)
-    {
-        int totalWritten = 0;
-        for (int i = 0; i < partitionArrays.Length; i++)
-        {
-            var items = partitionArrays[i];
-            if (items == null || partitionCounts[i] == 0)
-                continue;
-
-            var written = TryEnqueueBatchToPartition(i, items);
-            totalWritten += written;
-
-            // Update statistics and telemetry for the number of successfully appended items
-            for (int j = 0; j < written; j++)
-            {
-                _statistics.RecordAppend();
-            }
-            IncrementAppendCount(written);
-        }
-        return totalWritten;
-    }    /// <summary>
-         /// Optimized batch append for single partition scenarios.
-         /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public int TryAppendBatch(ReadOnlySpan<TEvent> batch, int partition)
-    {
-        if ((uint)partition >= (uint)GetPartitionCount())
-        {
-            throw new ArgumentOutOfRangeException(nameof(partition));
-        }
-        var written = TryEnqueueBatchToPartition(partition, batch);
-        // Update statistics
-        for (int i = 0; i < written; i++)
-        {
-            _statistics.RecordAppend();
-        }
-
-        // Update telemetry counter for successful appends
-        IncrementAppendCount(written);
-
-        return written;
-    }
-
-    /// <summary>
     /// Zero-allocation snapshot using chunked processing with pooled buffers.
     /// Processes results in fixed-size chunks to avoid large allocations.
     /// </summary>
@@ -1556,6 +1559,14 @@ public sealed class EventStore<TEvent>
     private int GetPartitionCount() => _usePadding ? _paddedPartitions!.Length : _partitions!.Length;
 
     /// <summary>
+    /// Helper to get approximate count from the appropriate partition type.
+    /// </summary>
+    private long GetPartitionCount(int partitionIndex)
+    {
+        return _usePadding ? _paddedPartitions![partitionIndex].CountApprox : _partitions![partitionIndex].CountApprox;
+    }
+
+    /// <summary>
     /// Enumerates the snapshot of a partition.
     /// </summary>
     /// <param name="partitionIndex">The index of the partition.</param>
@@ -1572,14 +1583,6 @@ public sealed class EventStore<TEvent>
     private int GetPartitionCapacity(int partitionIndex)
     {
         return _usePadding ? _paddedPartitions![partitionIndex].Capacity : _partitions![partitionIndex].Capacity;
-    }
-
-    /// <summary>
-    /// Helper to get approximate count from the appropriate partition type.
-    /// </summary>
-    private long GetPartitionCount(int partitionIndex)
-    {
-        return _usePadding ? _paddedPartitions![partitionIndex].CountApprox : _partitions![partitionIndex].CountApprox;
     }
 
     /// <summary>

@@ -9,6 +9,15 @@ namespace LockFree.EventStore.Tests;
 
 public class LockFreeRingBufferTests
 {
+    private static readonly int[] ExpectedSnapshotFirst = new[] { 3, 4, 5 };
+    private static readonly int[] Batch2467 = new[] { 4, 5, 6, 7 };
+    private static readonly int[] ExpectedArrAfterBatch = new[] { 3, 4, 5, 6, 7 };
+    private static readonly int[] ExpectedList = new[] { 1, 2, 3, 4 };
+    private static readonly double[] ExpectedEventValues = new[] { 2d, 3d, 4d };
+    private static readonly int[] ExpectedChunk1 = new[] { 1, 2, 3, 4 };
+    private static readonly int[] ExpectedChunk2 = new[] { 5, 6, 7, 8 };
+    private static readonly int[] ExpectedChunk3 = new[] { 9, 10 };
+
     [Fact]
     public void TryEnqueue_Overwrites_When_Full_And_Invokes_Discard()
     {
@@ -35,7 +44,7 @@ public class LockFreeRingBufferTests
         var tmp = new int[3];
         var len = buf.Snapshot(tmp);
         Assert.Equal(3, len);
-        Assert.Equal(new[] { 3, 4, 5 }, tmp);
+        Assert.Equal(ExpectedSnapshotFirst, tmp);
     }
 
     [Fact]
@@ -49,21 +58,21 @@ public class LockFreeRingBufferTests
         buf.TryEnqueue(3);
 
         // Batch of four forces wrap; implementation discards at most one per head advance
-        var written = buf.TryEnqueueBatch(new[] { 4, 5, 6, 7 });
+        var written = buf.TryEnqueueBatch(Batch2467);
         Assert.Equal(4, written);
         Assert.True(discarded >= 1);
 
         var arr = new int[5];
         var n = buf.Snapshot(arr);
         Assert.Equal(5, n);
-        Assert.Equal(new[] { 3, 4, 5, 6, 7 }, arr);
+        Assert.Equal(ExpectedArrAfterBatch, arr);
     }
 
     [Fact]
     public void CreateView_NoSelector_Returns_All_Elements()
     {
         var buf = new LockFreeRingBuffer<int>(4);
-        foreach (var i in Enumerable.Range(1, 4)) buf.TryEnqueue(i);
+        foreach (var i in ExpectedList) buf.TryEnqueue(i);
 
         var view = buf.CreateView();
         Assert.False(view.IsEmpty);
@@ -72,7 +81,7 @@ public class LockFreeRingBufferTests
         var list = new List<int>();
         foreach (var x in view)
             list.Add(x);
-        Assert.Equal(new[] { 1, 2, 3, 4 }, list);
+        Assert.Equal(ExpectedList, list);
     }
 
     [Fact]
@@ -91,7 +100,7 @@ public class LockFreeRingBufferTests
         Assert.Equal(3, view.Count);
         var items = new List<Event>();
         foreach (var e in view) items.Add(e);
-        Assert.Equal(new[] { 2d, 3d, 4d }, items.Select(e => e.Value));
+        Assert.Equal(ExpectedEventValues, items.Select(e => e.Value));
     }
 
     [Fact]
@@ -108,9 +117,9 @@ public class LockFreeRingBufferTests
 
         // Expect chunks of size 4,4,2
         Assert.Equal(3, chunks.Count);
-        Assert.Equal(new[] { 1, 2, 3, 4 }, chunks[0]);
-        Assert.Equal(new[] { 5, 6, 7, 8 }, chunks[1]);
-        Assert.Equal(new[] { 9, 10 }, chunks[2]);
+        Assert.Equal(ExpectedChunk1, chunks[0]);
+        Assert.Equal(ExpectedChunk2, chunks[1]);
+        Assert.Equal(ExpectedChunk3, chunks[2]);
     }
 
     [Fact]

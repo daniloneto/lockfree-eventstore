@@ -3,7 +3,10 @@ using System.Net.Http.Json;
 using LockFree.EventStore;
 using System.Linq;
 
-namespace ClientSample;
+namespace ClientSample
+{
+    public record MetricEvent(string Label, double Value, DateTime Timestamp);
+}
 
 // Client sample for the lockfree-eventstore Docker server (MetricsDashboard)
 // It will:

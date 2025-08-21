@@ -23,8 +23,8 @@ public sealed class LockFreeEventRingBuffer
     /// </summary>
     public LockFreeEventRingBuffer(int capacity, Action<Event>? onItemDiscarded = null)
     {
-        if (capacity <= 0)
-            throw new ArgumentOutOfRangeException(nameof(capacity));
+        // CA1512: prefer guard method
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
         _capacity = capacity;
         _buffer = new Event[capacity]; // Contiguous memory allocation
         _onItemDiscarded = onItemDiscarded;

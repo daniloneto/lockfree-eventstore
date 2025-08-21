@@ -45,8 +45,8 @@ public sealed class OptimizedPartition
     /// </summary>
     public OptimizedPartition(int capacity, StorageLayout layout = StorageLayout.AoS, Action<Event>? onItemDiscarded = null)
     {
-        if (capacity <= 0)
-            throw new ArgumentOutOfRangeException(nameof(capacity));
+        // CA1512: prefer guard method
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
         
         _capacity = capacity;
         _layout = layout;

@@ -35,8 +35,9 @@ public sealed class SpecializedEventStore
     /// </summary>
     public SpecializedEventStore(int capacity, int partitions, Action<Event>? onEventDiscarded = null)
     {
-        if (capacity <= 0) throw new ArgumentOutOfRangeException(nameof(capacity));
-        if (partitions <= 0) throw new ArgumentOutOfRangeException(nameof(partitions));
+        // CA1512: prefer guard methods
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
 
         _statistics = new EventStoreStatistics();
         _keyMap = new KeyMap();

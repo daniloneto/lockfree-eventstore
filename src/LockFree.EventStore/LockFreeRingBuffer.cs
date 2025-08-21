@@ -22,8 +22,7 @@ public sealed class LockFreeRingBuffer<T>
     /// </summary>
     public LockFreeRingBuffer(int capacity, Action<T>? onItemDiscarded = null)
     {
-        if (capacity <= 0)
-            throw new ArgumentOutOfRangeException(nameof(capacity));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
         _capacity = capacity;
         _buffer = new T[capacity];
         _onItemDiscarded = onItemDiscarded;
@@ -243,8 +242,7 @@ public sealed class LockFreeRingBuffer<T>
         long toTicks, 
         IEventTimestampSelector<T> timestampSelector)
     {
-        if (timestampSelector == null)
-            throw new ArgumentNullException(nameof(timestampSelector));
+        ArgumentNullException.ThrowIfNull(timestampSelector);
             
         const int maxRetries = 10;
         
