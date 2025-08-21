@@ -115,6 +115,7 @@ internal static class Buffers
     /// </summary>
     public static void ProcessInChunks<T>(ReadOnlySpan<T> data, Action<ReadOnlySpan<T>> processor, int chunkSize = DefaultChunkSize)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(chunkSize);
         for (int i = 0; i < data.Length; i += chunkSize)
         {
             var chunk = data.Slice(i, Math.Min(chunkSize, data.Length - i));

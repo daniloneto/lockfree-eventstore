@@ -1,0 +1,54 @@
+# Ignore Git metadata
+.git
+.gitignore
+.gitattributes
+
+# Build output
+**/bin/
+**/obj/
+**/TestResults/
+
+# User-specific files
+*.user
+*.suo
+*.swp
+*.userosscache
+*.sln.docstates
+
+# IDE / tooling
+.vs/
+.idea/
+.vscode/
+
+# Package caches / lockfiles not needed in image
+packages/
+.nuget/
+
+# Logs / coverage
+logs/
+*.log
+coverage/
+coverage*.json
+coverage*.xml
+lcov.info
+
+# Docker files not needed in context (keep Dockerfile itself)
+Dockerfile*
+!Dockerfile
+.dockerignore
+
+# OS / misc
+[Tt]humbs.db
+[Dd]esktop.ini
+*.DS_Store
+
+# Node / Frontend (if added later)
+node_modules/
+
+# Publish artifacts (will be regenerated)
+**/publish/
+
+# Temporary
+*.tmp
+*.bak
+~$*

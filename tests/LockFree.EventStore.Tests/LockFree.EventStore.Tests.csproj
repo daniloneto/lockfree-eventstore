@@ -1,4 +1,5 @@
-<Project Sdk="Microsoft.NET.Sdk">  <PropertyGroup>
+<Project Sdk="Microsoft.NET.Sdk">  
+  <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <IsPackable>false</IsPackable>
     <NoWarn>1591</NoWarn>
@@ -8,6 +9,13 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.9.0" />
     <PackageReference Include="xunit" Version="2.5.0" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.5.0" />
+    <!-- Enable coverage collection via collector (kept for other scripts) -->
+    <PackageReference Include="coverlet.collector" Version="6.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!-- Enable coverage via MSBuild for Sonar (OpenCover) -->
+    <PackageReference Include="coverlet.msbuild" Version="6.0.2" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/LockFree.EventStore/LockFree.EventStore.csproj" />

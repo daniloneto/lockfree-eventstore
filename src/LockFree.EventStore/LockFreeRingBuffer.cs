@@ -22,8 +22,7 @@ public sealed class LockFreeRingBuffer<T>
     /// </summary>
     public LockFreeRingBuffer(int capacity, Action<T>? onItemDiscarded = null)
     {
-        if (capacity <= 0)
-            throw new ArgumentOutOfRangeException(nameof(capacity));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
         _capacity = capacity;
         _buffer = new T[capacity];
         _onItemDiscarded = onItemDiscarded;
@@ -55,7 +54,7 @@ public sealed class LockFreeRingBuffer<T>
         var tail = Interlocked.Increment(ref _tail);
         var index = (int)((tail - 1) % _capacity);
         _buffer[index] = item;
-        AdvanceHeadIfNeeded(tail);
+        AdvanceHeadTo(tail);
         
         // Update epoch sparingly - only when tail advances significantly
         if ((tail & 0xFF) == 0) // Every 256 items
@@ -89,18 +88,18 @@ public sealed class LockFreeRingBuffer<T>
         if (batch.IsEmpty) return 0;
         
         // Reserve space for the entire batch atomically
-        var startTail = Interlocked.Add(ref _tail, batch.Length);
-        var endTail = startTail;
+        var endTail = Interlocked.Add(ref _tail, batch.Length);
+        var startPosition = endTail - batch.Length;
         
         // Write all items to their reserved positions
         for (int i = 0; i < batch.Length; i++)
         {
-            var position = startTail - batch.Length + i;
+            var position = startPosition + i;
             _buffer[position % _capacity] = batch[i];
         }
         
-        // Advance head if needed for the entire batch
-        AdvanceHeadIfNeeded(endTail);
+        // Advance head to maintain ring invariants (and invoke discard callbacks for all overwritten)
+        AdvanceHeadTo(endTail);
         
         // Update epoch once for the batch
         if ((endTail & 0xFF) == 0 || ((endTail - batch.Length) & 0xFF) > (endTail & 0xFF))
@@ -109,23 +108,27 @@ public sealed class LockFreeRingBuffer<T>
         }
         
         return batch.Length;
-    }    private void AdvanceHeadIfNeeded(long tail)
+    }    private void AdvanceHeadTo(long tail)
     {
         while (true)
         {
             var head = Volatile.Read(ref _head);
-            if (tail - head <= _capacity)
+            var desiredHead = tail - _capacity;
+            if (desiredHead <= head)
                 break;
             
-            // Try to advance head atomically
-            if (Interlocked.CompareExchange(ref _head, head + 1, head) == head)
+            // Try to advance head to the desired position in one step
+            if (Interlocked.CompareExchange(ref _head, desiredHead, head) == head)
             {
-                // Only notify about discarded item if we successfully advanced the head
+                // Notify about each discarded item if callback is provided
                 if (_onItemDiscarded != null)
                 {
-                    var discardedIndex = head % _capacity;
-                    var discardedItem = _buffer[discardedIndex];
-                    _onItemDiscarded(discardedItem);
+                    for (long h = head; h < desiredHead; h++)
+                    {
+                        var idx = (int)(h % _capacity);
+                        var discardedItem = _buffer[idx];
+                        _onItemDiscarded(discardedItem);
+                    }
                 }
                 break;
             }
@@ -239,8 +242,7 @@ public sealed class LockFreeRingBuffer<T>
         long toTicks, 
         IEventTimestampSelector<T> timestampSelector)
     {
-        if (timestampSelector == null)
-            throw new ArgumentNullException(nameof(timestampSelector));
+        ArgumentNullException.ThrowIfNull(timestampSelector);
             
         const int maxRetries = 10;
         
@@ -331,15 +333,19 @@ public sealed class LockFreeRingBuffer<T>
         for (int i = 0; i < totalCount; i++)
         {
             var index = (int)((head + i) % _capacity);
-            var item = _buffer[index];
-            var itemTicks = timestampSelector.GetTimestamp(item).Ticks;
-            
-            if (itemTicks >= fromTicks && itemTicks <= toTicks)
+            var item = _buffer[index];            if (timestampSelector != null)
             {
-                if (validStart == -1)
-                    validStart = i;
-                validEnd = i;
-                validCount++;
+                var timestamp = timestampSelector.GetTimestamp(item);
+                var ticks = timestamp.Ticks;
+                
+                // Use same logic as WithinWindow: from inclusive, to inclusive  
+                if (ticks >= fromTicks && ticks <= toTicks)
+                {
+                    if (validStart == -1)
+                        validStart = i;
+                    validEnd = i;
+                    validCount++;
+                }
             }
         }
         

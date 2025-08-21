@@ -12,8 +12,7 @@ public static class Partitioners
     /// </summary>
     public static int ForKey<TKey>(TKey key, int partitions)
     {
-        if (partitions <= 0)
-            throw new ArgumentOutOfRangeException(nameof(partitions));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
         return (int)((uint)HashCode.Combine(key) % partitions);
     }    /// <summary>
     /// Maps a KeyId to a partition index using optimized integer arithmetic.
@@ -22,12 +21,12 @@ public static class Partitioners
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int ForKeyId(KeyId keyId, int partitions)
     {
-        if (partitions <= 0)
-            throw new ArgumentOutOfRangeException(nameof(partitions));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
         
-        // Use the KeyId value directly with fast modulo
-        // Since KeyId values are sequential, this provides good distribution
-        return (int)PerformanceHelpers.FastMod((uint)keyId.Value, (uint)partitions);
+        // Use fast bitmask when partitions is a power of two; otherwise fallback to modulo
+        if (PerformanceHelpers.IsPowerOfTwo(partitions))
+            return PerformanceHelpers.FastMod(keyId.Value, partitions);
+        return keyId.Value % partitions;
     }
 
     /// <summary>
@@ -37,8 +36,7 @@ public static class Partitioners
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int ForKeyIdSimple(KeyId keyId, int partitions)
     {
-        if (partitions <= 0)
-            throw new ArgumentOutOfRangeException(nameof(partitions));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
         return keyId.Value % partitions;
     }
 }

@@ -45,8 +45,8 @@ public sealed class OptimizedPartition
     /// </summary>
     public OptimizedPartition(int capacity, StorageLayout layout = StorageLayout.AoS, Action<Event>? onItemDiscarded = null)
     {
-        if (capacity <= 0)
-            throw new ArgumentOutOfRangeException(nameof(capacity));
+        // CA1512: prefer guard method
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
         
         _capacity = capacity;
         _layout = layout;
@@ -169,27 +169,29 @@ public sealed class OptimizedPartition
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]    private void AdvanceHeadIfNeeded(long tail)
     {
-        var head = Volatile.Read(ref _head);
-        
-        while (tail - head > _capacity)
+        while (true)
         {
-            // Discard oldest events if necessary
-            var expectedHead = head;
-            var newHead = head + 1;
-            
-            if (Interlocked.CompareExchange(ref _head, newHead, expectedHead) == expectedHead)
+            var head = Volatile.Read(ref _head);
+            var targetHead = tail - _capacity;
+            if (targetHead <= head)
+                return; // No advance needed
+
+            // Attempt to move head in one step
+            if (Interlocked.CompareExchange(ref _head, targetHead, head) == head)
             {
+                // Invoke discard callback for all overwritten items
                 if (_onItemDiscarded != null)
                 {
-                    var index = (int)(head % _capacity);
-                    var eventItem = GetEventAt(index);
-                    _onItemDiscarded(eventItem);
+                    for (long i = head; i < targetHead; i++)
+                    {
+                        var index = (int)(i % _capacity);
+                        var eventItem = GetEventAt(index);
+                        _onItemDiscarded(eventItem);
+                    }
                 }
-                
-                break;
+                return;
             }
-            
-            head = Volatile.Read(ref _head);
+            // CAS failed, retry with updated head
         }
     }
     
@@ -247,10 +249,11 @@ public sealed class OptimizedPartition
         // For AoS layout, we can use the existing buffer directly
         var headIndex = (int)(head % _capacity);
         var tailIndex = (int)(tail % _capacity);
+        var isFull = count == _capacity;
         
-        if (tailIndex > headIndex || (tailIndex == headIndex && count == _capacity))
+        if (tailIndex > headIndex || (isFull && headIndex == 0))
         {
-            // No wrap-around case
+            // No wrap-around case (or full buffer starting at index 0)
             var segment = new ReadOnlyMemory<Event>(_events!, headIndex, count);
             
             return new PartitionView<Event>(
@@ -262,7 +265,7 @@ public sealed class OptimizedPartition
         }
         else
         {
-            // Wrap-around case
+            // Wrap-around case (including full buffer with headIndex > 0)
             var segment1 = new ReadOnlyMemory<Event>(_events!, headIndex, _capacity - headIndex);
             var segment2 = new ReadOnlyMemory<Event>(_events!, 0, tailIndex);
             
@@ -529,10 +532,11 @@ public sealed class OptimizedPartition
             // For AoS layout, we can use the existing buffer directly
             var headIndex = (int)(head % _capacity);
             var tailIndex = (int)(tail % _capacity);
+            var isFull = count == _capacity;
             
-            if (tailIndex > headIndex || (tailIndex == headIndex && count == _capacity))
+            if (tailIndex > headIndex || (isFull && headIndex == 0))
             {
-                // No wrap-around case
+                // No wrap-around case (or full buffer starting at index 0)
                 var segment = new ReadOnlyMemory<Event>(_events!, headIndex, count);
                 
                 processor(new PartitionView<Event>(
@@ -544,7 +548,7 @@ public sealed class OptimizedPartition
             }
             else
             {
-                // Wrap-around case
+                // Wrap-around case (including full buffer with headIndex > 0)
                 var segment1 = new ReadOnlyMemory<Event>(_events!, headIndex, _capacity - headIndex);
                 var segment2 = new ReadOnlyMemory<Event>(_events!, 0, tailIndex);
                 

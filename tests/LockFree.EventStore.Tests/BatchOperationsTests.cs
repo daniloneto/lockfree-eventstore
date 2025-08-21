@@ -6,6 +6,10 @@ namespace LockFree.EventStore.Tests;
 
 public class BatchOperationsTests
 {
+    // Static expected arrays for asserts (CA1861)
+    private static readonly int[] Expected_1_to_5 = new[] { 1, 2, 3, 4, 5 };
+    private static readonly int[] Expected_4_to_8 = new[] { 4, 5, 6, 7, 8 };
+
     [Fact]
     public void TryAppendBatch_Works_Correctly()
     {
@@ -76,7 +80,7 @@ public class BatchOperationsTests
         var count = buffer.Snapshot(snapshot);
         
         Assert.Equal(5, count);
-        Assert.Equal(new int[] { 1, 2, 3, 4, 5 }, snapshot.Take(5).ToArray());
+        Assert.Equal(Expected_1_to_5, snapshot.Take(5).ToArray());
     }
 
     [Fact]
@@ -144,7 +148,7 @@ public class BatchOperationsTests
 
         Assert.Equal(5, count);
         // Should contain the last 5 items: 4, 5, 6, 7, 8
-        Assert.Equal(new int[] { 4, 5, 6, 7, 8 }, destination.ToArray());
+        Assert.Equal(Expected_4_to_8, destination.ToArray());
     }    [Fact]
     public void TryAppendAll_Works_With_Ring_Buffer_Behavior()
     {
