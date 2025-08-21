@@ -1351,22 +1351,34 @@ public sealed class EventStore<TEvent>
     private static bool TryExtractNumericValue(TEvent item, out double value)
     {
         value = 0.0;
-        if (item == null) return false;
+        if (System.Collections.Generic.EqualityComparer<TEvent>.Default.Equals(item, default(TEvent))) return false;
 
         var type = typeof(TEvent);
 
+        // Fast-path for known types
+        if (TryGetKnownTypeValue(item, type, out value)) return true;
+
+        // Generic fallback: first numeric property
+        foreach (var prop in type.GetProperties())
+        {
+            if (!prop.CanRead) continue;
+            var v = prop.GetValue(item);
+            if (TryCoerceToDouble(v, out value)) return true;
+        }
+
+        return false;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool TryGetKnownTypeValue(TEvent item, Type type, out double value)
+    {
         // Common fast-paths for known sample types
         if (type.Name == "Order")
         {
             var amountProperty = type.GetProperty("Amount");
             if (amountProperty != null)
             {
-                var amount = amountProperty.GetValue(item);
-                if (amount is decimal decimalAmount) { value = (double)decimalAmount; return true; }
-                if (amount is double doubleAmount) { value = doubleAmount; return true; }
-                if (amount is float floatAmount) { value = (double)floatAmount; return true; }
-                if (amount is int intAmount) { value = intAmount; return true; }
-                if (amount is long longAmount) { value = longAmount; return true; }
+                return TryCoerceToDouble(amountProperty.GetValue(item), out value);
             }
         }
         if (type.Name == "MetricEvent")
@@ -1374,25 +1386,31 @@ public sealed class EventStore<TEvent>
             var valueProperty = type.GetProperty("Value");
             if (valueProperty != null)
             {
-                var val = valueProperty.GetValue(item);
-                if (val is double dv) { value = dv; return true; }
-                if (val is decimal dd) { value = (double)dd; return true; }
-                if (val is float ff) { value = (double)ff; return true; }
+                return TryCoerceToDouble(valueProperty.GetValue(item), out value);
             }
         }
-
-        // Generic fallback: first numeric property
-        foreach (var prop in type.GetProperties())
-        {
-            var v = prop.GetValue(item);
-            if (v is decimal dec) { value = (double)dec; return true; }
-            if (v is double d) { value = d; return true; }
-            if (v is float f) { value = (double)f; return true; }
-            if (v is int i) { value = i; return true; }
-            if (v is long l) { value = l; return true; }
-        }
-
+        value = 0.0;
         return false;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool TryCoerceToDouble(object? val, out double value)
+    {
+        switch (val)
+        {
+            case double dv: value = dv; return true;
+            case float ff: value = ff; return true;
+            case decimal dd: value = (double)dd; return true;
+            case int i: value = i; return true;
+            case long l: value = l; return true;
+            case uint ui: value = ui; return true;
+            case ulong ul: value = ul; return true;
+            case short s: value = s; return true;
+            case ushort us: value = us; return true;
+            case byte b: value = b; return true;
+            case sbyte sb: value = sb; return true;
+            default: value = 0.0; return false;
+        }
     }
 
     /// <summary>

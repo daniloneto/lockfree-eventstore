@@ -92,6 +92,73 @@ public sealed class SpecializedEventStore
     /// </summary>
     public EventStoreStatistics Statistics => _statistics;
 
+    // --- String <-> KeyId bridge (uses _keyMap) ---
+
+    /// <summary>
+    /// Resolves or creates a KeyId for the provided string key.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public KeyId GetOrCreateKeyId(string key) => _keyMap.GetOrAdd(key);
+
+    /// <summary>
+    /// Attempts to resolve a KeyId for the provided string key without creating a new one.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryGetKeyId(string key, out KeyId id) => _keyMap.TryGet(key, out id);
+
+    /// <summary>
+    /// Number of distinct keys registered in the key map.
+    /// </summary>
+    public int RegisteredKeysCount => _keyMap.Count;
+
+    /// <summary>
+    /// Returns a snapshot of all string->KeyId mappings.
+    /// </summary>
+    public IReadOnlyDictionary<string, KeyId> GetKeyMappings() => _keyMap.GetAllMappings();
+
+    /// <summary>
+    /// Adds a single event by string key, value and timestamp ticks.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Add(string key, double value, long timestampTicks)
+    {
+        var keyId = _keyMap.GetOrAdd(key);
+        Add(keyId, value, timestampTicks);
+    }
+
+    /// <summary>
+    /// Adds a single event by string key, value and DateTime timestamp.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Add(string key, double value, DateTime timestamp)
+    {
+        var keyId = _keyMap.GetOrAdd(key);
+        Add(keyId, value, timestamp);
+    }
+
+    /// <summary>
+    /// Queries events by string key within an optional time range.
+    /// If the key was never seen, returns an empty sequence.
+    /// </summary>
+    public IEnumerable<Event> Query(string key, DateTime? from = null, DateTime? to = null)
+    {
+        if (!_keyMap.TryGet(key, out var keyId))
+            return Array.Empty<Event>();
+        return Query(keyId, from, to);
+    }
+
+    /// <summary>
+    /// Zero-allocation query by string key using chunked processing.
+    /// If the key was never seen, nothing is emitted.
+    /// </summary>
+    public void QueryByKeyZeroAlloc(string key, Action<ReadOnlySpan<Event>> processor, DateTime? from = null, DateTime? to = null, int chunkSize = Buffers.DefaultChunkSize)
+    {
+        if (_keyMap.TryGet(key, out var keyId))
+        {
+            QueryByKeyZeroAlloc(keyId, processor, from, to, chunkSize);
+        }
+    }
+
     /// <summary>
     /// Adds a single event to the store with optimized partitioning.
     /// </summary>
@@ -483,7 +550,8 @@ public sealed class SpecializedEventStore
         }
         else if (to.HasValue)
         {
-            partitionBuffer.SnapshotFilteredZeroAlloc(e => e.Key.Equals(key) && e.TimestampTicks <= to.Value.Ticks, processor, chunkSize);
+            var toTicks = to.Value.Ticks;
+            partitionBuffer.SnapshotFilteredZeroAlloc(e => e.Key.Equals(key) && e.TimestampTicks <= toTicks, processor, chunkSize);
         }
         else
         {
@@ -535,52 +603,57 @@ public sealed class SpecializedEventStore
     /// </summary>
     public void AggregateByKeyZeroAlloc(Action<ReadOnlySpan<KeyValuePair<KeyId, double>>> processor, int chunkSize = Buffers.DefaultChunkSize)
     {
-        // Use a Dictionary for accumulation (this still allocates, but only once per call)
         var results = new Dictionary<KeyId, double>();
-        
+
         // Process each partition and accumulate results
         foreach (var partition in _partitions)
         {
-            partition.SnapshotZeroAlloc(events =>
-            {
-                foreach (var e in events)
-                {
-                    if (results.TryGetValue(e.Key, out var existingValue))
-                    {
-                        results[e.Key] = existingValue + e.Value;
-                    }
-                    else
-                    {
-                        results[e.Key] = e.Value;
-                    }
-                }
-            }, chunkSize);
+            partition.SnapshotZeroAlloc(events => AccumulateResults(results, events), chunkSize);
         }
 
-        // Output results in chunks using pooled buffer
-        if (results.Count > 0)
+        // Emit results in chunks
+        EmitResultsChunks(results, processor, chunkSize);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AccumulateResults(Dictionary<KeyId, double> results, ReadOnlySpan<Event> events)
+    {
+        for (int i = 0; i < events.Length; i++)
         {
-            Buffers.WithRentedBuffer<KeyValuePair<KeyId, double>>(chunkSize, buffer =>
+            var e = events[i];
+            if (results.TryGetValue(e.Key, out var existing))
             {
-                var count = 0;
-                foreach (var kvp in results)
-                {
-                    buffer[count++] = kvp;
-                    
-                    if (count >= buffer.Length)
-                    {
-                        processor(buffer.AsSpan(0, count));
-                        count = 0;
-                    }
-                }
-                
-                // Process remaining items
-                if (count > 0)
+                results[e.Key] = existing + e.Value;
+            }
+            else
+            {
+                results[e.Key] = e.Value;
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void EmitResultsChunks(Dictionary<KeyId, double> results, Action<ReadOnlySpan<KeyValuePair<KeyId, double>>> processor, int chunkSize)
+    {
+        if (results.Count == 0) return;
+
+        Buffers.WithRentedBuffer<KeyValuePair<KeyId, double>>(chunkSize, buffer =>
+        {
+            var count = 0;
+            foreach (var kvp in results)
+            {
+                buffer[count++] = kvp;
+                if (count >= buffer.Length)
                 {
                     processor(buffer.AsSpan(0, count));
+                    count = 0;
                 }
-            }, ArrayPool<KeyValuePair<KeyId, double>>.Shared);
-        }
+            }
+            if (count > 0)
+            {
+                processor(buffer.AsSpan(0, count));
+            }
+        }, ArrayPool<KeyValuePair<KeyId, double>>.Shared);
     }
 
     /// <summary>
@@ -594,44 +667,9 @@ public sealed class SpecializedEventStore
         
         foreach (var partition in _partitions)
         {
-            partition.SnapshotTimeRangeZeroAlloc(fromTicks, toTicks, events =>
-            {
-                foreach (var e in events)
-                {
-                    if (results.TryGetValue(e.Key, out var existingValue))
-                    {
-                        results[e.Key] = existingValue + e.Value;
-                    }
-                    else
-                    {
-                        results[e.Key] = e.Value;
-                    }
-                }
-            }, chunkSize);
+            partition.SnapshotTimeRangeZeroAlloc(fromTicks, toTicks, events => AccumulateResults(results, events), chunkSize);
         }
 
-        // Output results in chunks
-        if (results.Count > 0)
-        {
-            Buffers.WithRentedBuffer<KeyValuePair<KeyId, double>>(chunkSize, buffer =>
-            {
-                var count = 0;
-                foreach (var kvp in results)
-                {
-                    buffer[count++] = kvp;
-                    
-                    if (count >= buffer.Length)
-                    {
-                        processor(buffer.AsSpan(0, count));
-                        count = 0;
-                    }
-                }
-                
-                if (count > 0)
-                {
-                    processor(buffer.AsSpan(0, count));
-                }
-            }, ArrayPool<KeyValuePair<KeyId, double>>.Shared);
-        }
+        EmitResultsChunks(results, processor, chunkSize);
     }
 }

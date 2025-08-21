@@ -292,51 +292,67 @@ public static class ZeroAllocationExtensions
         where TKey : notnull
     {
         var groups = new Dictionary<TKey, List<TEvent>>();
-        
+
+        // Process events in chunks and accumulate into groups
         store.ProcessEventsChunked<TEvent, Dictionary<TKey, List<TEvent>>>(
             groups,
-            (currentGroups, chunk) =>
-            {
-                foreach (var evt in chunk)
-                {
-                    var key = keySelector(evt);
-                    if (!currentGroups.TryGetValue(key, out var list))
-                    {
-                        list = new List<TEvent>();
-                        currentGroups[key] = list;
-                    }
-                    list.Add(evt);
-                }
-                return currentGroups;
-            },
+            (currentGroups, chunk) => AccumulateGroups(currentGroups, chunk, keySelector),
             filter,
             from,
             to,
             chunkSize);
 
-        // Output results in chunks
-        if (groups.Count > 0)
+        // Emit grouped results in chunks
+        EmitGroupsChunks(groups, processor, chunkSize);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Dictionary<TKey, List<TEvent>> AccumulateGroups<TEvent, TKey>(
+        Dictionary<TKey, List<TEvent>> currentGroups,
+        ReadOnlySpan<TEvent> chunk,
+        Func<TEvent, TKey> keySelector)
+        where TKey : notnull
+    {
+        for (int i = 0; i < chunk.Length; i++)
         {
-            Buffers.WithRentedBuffer<KeyValuePair<TKey, List<TEvent>>>(chunkSize, buffer =>
+            var evt = chunk[i];
+            var key = keySelector(evt);
+            if (!currentGroups.TryGetValue(key, out var list))
             {
-                var count = 0;
-                foreach (var kvp in groups)
-                {
-                    buffer[count++] = kvp;
-                    
-                    if (count >= buffer.Length)
-                    {
-                        processor(buffer.AsSpan(0, count));
-                        count = 0;
-                    }
-                }
-                
-                if (count > 0)
+                list = new List<TEvent>();
+                currentGroups[key] = list;
+            }
+            list.Add(evt);
+        }
+        return currentGroups;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void EmitGroupsChunks<TEvent, TKey>(
+        Dictionary<TKey, List<TEvent>> groups,
+        Action<ReadOnlySpan<KeyValuePair<TKey, List<TEvent>>>> processor,
+        int chunkSize)
+        where TKey : notnull
+    {
+        if (groups.Count == 0) return;
+
+        Buffers.WithRentedBuffer<KeyValuePair<TKey, List<TEvent>>>(chunkSize, buffer =>
+        {
+            var count = 0;
+            foreach (var kvp in groups)
+            {
+                buffer[count++] = kvp;
+                if (count >= buffer.Length)
                 {
                     processor(buffer.AsSpan(0, count));
+                    count = 0;
                 }
-            }, ArrayPool<KeyValuePair<TKey, List<TEvent>>>.Shared);
-        }
+            }
+            if (count > 0)
+            {
+                processor(buffer.AsSpan(0, count));
+            }
+        }, ArrayPool<KeyValuePair<TKey, List<TEvent>>>.Shared);
     }
 
     /// <summary>

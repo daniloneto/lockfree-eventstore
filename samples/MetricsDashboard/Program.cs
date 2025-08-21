@@ -62,13 +62,13 @@ internal static class Program
                 var agg = new Dictionary<string, (int Count, long Sum)>();
                 orderStore.ProcessEvents(agg, (ref Dictionary<string, (int Count, long Sum)> state, OrderEvent e, DateTime? _) =>
                 {
-                    if (e.Stream == stream)
-                    {
-                        if (!state.TryGetValue(e.GatewayId, out var val)) val = (0, 0);
-                        val.Count++;
-                        val.Sum += e.Valor;
-                        state[e.GatewayId] = val;
-                    }
+                    // Guard clause to reduce nesting
+                    if (e.Stream != stream) return true;
+
+                    if (!state.TryGetValue(e.GatewayId, out var val)) val = (0, 0);
+                    val.Count++;
+                    val.Sum += e.Valor;
+                    state[e.GatewayId] = val;
                     return true;
                 });
                 var elapsedMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
@@ -82,16 +82,16 @@ internal static class Program
             var list = new List<GatewayOrderCreated>();
             orderStore.ProcessEvents(list, (ref List<GatewayOrderCreated> acc, OrderEvent e, DateTime? ts) =>
             {
-                if (e.Stream == stream)
+                // Guard clause to reduce nesting
+                if (e.Stream != stream) return true;
+
+                acc.Add(new GatewayOrderCreated
                 {
-                    acc.Add(new GatewayOrderCreated
-                    {
-                        Id = e.Id,
-                        GatewayId = e.GatewayId,
-                        Valor = e.Valor,
-                        Timestamp = e.Timestamp
-                    });
-                }
+                    Id = e.Id,
+                    GatewayId = e.GatewayId,
+                    Valor = e.Valor,
+                    Timestamp = e.Timestamp
+                });
                 return true;
             });
             return Results.Ok(list);
@@ -100,148 +100,135 @@ internal static class Program
 
     private static void MapMetricsRoutes(WebApplication app, EventStore<MetricEvent> store)
     {
-        app.MapPost("/metrics", (MetricEvent m) =>
-        {
-            store.TryAppend(m);
-            return Results.Accepted();
-        });
+        app.MapPost("/metrics", (MetricEvent m) => PostMetrics(store, m));
 
-        // Traditional sum endpoint
         app.MapGet("/metrics/sum", (DateTime? from, DateTime? to, string label) =>
-        {
-            double sum = store.Aggregate(() => 0d, (acc, e) =>
-            {
-                if (e.Label == label) return acc + e.Value; else return acc;
-            }, from: from, to: to);
-            return Results.Ok(sum);
-        });
+            GetMetricsSum(store, from, to, label));
 
-        // New optimized sum by window endpoint
         app.MapGet("/metrics/sum-window", (string label, int minutes = 10) =>
-        {
-            var from = DateTime.UtcNow.AddMinutes(-minutes);
-            var to = DateTime.UtcNow;
+            GetMetricsSumWindow(store, label, minutes));
 
-            // Use the new SumWindow method if available, otherwise fallback to traditional
-            double sum = store.Aggregate(() => 0d, (acc, e) =>
-            {
-                if (e.Label == label) return acc + e.Value; else return acc;
-            }, from: from, to: to);
-
-            return Results.Ok(sum);
-        });
-
-        // New window aggregation endpoint
         app.MapGet("/metrics/window", (DateTime? from, DateTime? to, string? label) =>
-        {
-            var predicate = label != null ?
-                new Predicate<MetricEvent>(e => e.Label == label) :
-                null;
+            GetMetricsWindow(store, from, to, label));
 
-            var fromTicks = from?.Ticks ?? DateTime.MinValue.Ticks;
-            var toTicks = to?.Ticks ?? DateTime.MaxValue.Ticks;
+        app.MapGet("/metrics/snapshot-views", () => GetMetricsSnapshotViews(store));
 
-            var result = store.AggregateWindow(fromTicks, toTicks, predicate);
-
-            return Results.Ok(new
-            {
-                count = result.Count,
-                sum = result.Sum,
-                min = result.Min,
-                max = result.Max,
-                avg = result.Avg,
-                window = new
-                {
-                    from = from?.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                    to = to?.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                    label = label
-                }
-            });
-        });
-
-        // Endpoint for snapshot views (zero-allocation)
-        app.MapGet("/metrics/snapshot-views", () =>
-        {
-            var views = store.SnapshotViews();
-            var totalEvents = views.Sum(v => v.Count);
-
-            return Results.Ok(new
-            {
-                partitions = views.Count,
-                totalEvents = totalEvents,
-                views = views.Select(v => new
-                {
-                    segmentCount = v.HasWrapAround ? 2 : 1,
-                    totalCount = v.Count,
-                    hasWrapAround = v.HasWrapAround,
-                    isEmpty = v.IsEmpty
-                }).ToArray()
-            });
-        });
-
-        // Endpoint for zero-allocation aggregation
         app.MapGet("/metrics/aggregate-zero-alloc", (DateTime? from, DateTime? to) =>
-        {
-            var fromTicks = from?.Ticks ?? DateTime.MinValue.Ticks;
-            var toTicks = to?.Ticks ?? DateTime.MaxValue.Ticks;
+            GetMetricsAggregateZeroAlloc(store, from, to));
 
-            var result = (Sum: 0.0, Min: double.MaxValue, Max: double.MinValue, Count: 0);
-
-            // Use zero-allocation processing
-            result = store.ProcessEvents(
-                result,
-                (ref (double Sum, double Min, double Max, int Count) state, MetricEvent evt, DateTime? timestamp) =>
-                {
-                    var eventTicks = timestamp?.Ticks ?? evt.Timestamp.Ticks;
-                    if (eventTicks >= fromTicks && eventTicks <= toTicks)
-                    {
-                        state.Sum += evt.Value;
-                        state.Count++;
-                        if (evt.Value < state.Min) state.Min = evt.Value;
-                        if (evt.Value > state.Max) state.Max = evt.Value;
-                    }
-                    return true; // Continue processing
-                },
-                null, // No filter
-                from,
-                to
-            );
-
-            return Results.Ok(new
-            {
-                count = result.Count,
-                sum = result.Sum,
-                min = result.Count > 0 ? result.Min : 0,
-                max = result.Count > 0 ? result.Max : 0,
-                avg = result.Count > 0 ? result.Sum / result.Count : 0
-            });
-        });
-
-        // Endpoint for event processing with callbacks
         app.MapGet("/metrics/process-events", (string? label) =>
+            GetMetricsProcessEvents(store, label));
+    }
+
+    private static IResult PostMetrics(EventStore<MetricEvent> store, MetricEvent m)
+    {
+        store.TryAppend(m);
+        return Results.Accepted();
+    }
+
+    private static IResult GetMetricsSum(EventStore<MetricEvent> store, DateTime? from, DateTime? to, string label)
+    {
+        double sum = store.Aggregate(() => 0d, (acc, e) => e.Label == label ? acc + e.Value : acc, from: from, to: to);
+        return Results.Ok(sum);
+    }
+
+    private static IResult GetMetricsSumWindow(EventStore<MetricEvent> store, string label, int minutes)
+    {
+        var from = DateTime.UtcNow.AddMinutes(-minutes);
+        var to = DateTime.UtcNow;
+        double sum = store.Aggregate(() => 0d, (acc, e) => e.Label == label ? acc + e.Value : acc, from: from, to: to);
+        return Results.Ok(sum);
+    }
+
+    private static IResult GetMetricsWindow(EventStore<MetricEvent> store, DateTime? from, DateTime? to, string? label)
+    {
+        var predicate = label != null ? new Predicate<MetricEvent>(e => e.Label == label) : null;
+        var fromTicks = from?.Ticks ?? DateTime.MinValue.Ticks;
+        var toTicks = to?.Ticks ?? DateTime.MaxValue.Ticks;
+        var result = store.AggregateWindow(fromTicks, toTicks, predicate);
+        return Results.Ok(new
         {
-            var result = (Processed: 0, HighCpuCount: 0);
-
-            result = store.ProcessEvents(
-                result,
-                (ref (int Processed, int HighCpuCount) state, MetricEvent evt, DateTime? timestamp) =>
-                {
-                    state.Processed++;
-                    // Merge nested conditions to satisfy S1066
-                    if ((label == null || evt.Label.Contains(label)) && evt.Value > 50)
-                    {
-                        state.HighCpuCount++;
-                    }
-                    return true; // Continue processing
-                }
-            );
-
-            return Results.Ok(new
+            count = result.Count,
+            sum = result.Sum,
+            min = result.Min,
+            max = result.Max,
+            avg = result.Avg,
+            window = new
             {
-                processed = result.Processed,
-                highCpuCount = result.HighCpuCount
-            });
+                from = from?.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                to = to?.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                label = label
+            }
         });
+    }
+
+    private static IResult GetMetricsSnapshotViews(EventStore<MetricEvent> store)
+    {
+        var views = store.SnapshotViews();
+        var totalEvents = views.Sum(v => v.Count);
+        return Results.Ok(new
+        {
+            partitions = views.Count,
+            totalEvents = totalEvents,
+            views = views.Select(v => new
+            {
+                segmentCount = v.HasWrapAround ? 2 : 1,
+                totalCount = v.Count,
+                hasWrapAround = v.HasWrapAround,
+                isEmpty = v.IsEmpty
+            }).ToArray()
+        });
+    }
+
+    private static IResult GetMetricsAggregateZeroAlloc(EventStore<MetricEvent> store, DateTime? from, DateTime? to)
+    {
+        var fromTicks = from?.Ticks ?? DateTime.MinValue.Ticks;
+        var toTicks = to?.Ticks ?? DateTime.MaxValue.Ticks;
+        var result = (Sum: 0.0, Min: double.MaxValue, Max: double.MinValue, Count: 0);
+        result = store.ProcessEvents(
+            result,
+            (ref (double Sum, double Min, double Max, int Count) state, MetricEvent evt, DateTime? timestamp) =>
+            {
+                var eventTicks = timestamp?.Ticks ?? evt.Timestamp.Ticks;
+                if (eventTicks >= fromTicks && eventTicks <= toTicks)
+                {
+                    state.Sum += evt.Value;
+                    state.Count++;
+                    if (evt.Value < state.Min) state.Min = evt.Value;
+                    if (evt.Value > state.Max) state.Max = evt.Value;
+                }
+                return true;
+            },
+            null,
+            from,
+            to
+        );
+        return Results.Ok(new
+        {
+            count = result.Count,
+            sum = result.Sum,
+            min = result.Count > 0 ? result.Min : 0,
+            max = result.Count > 0 ? result.Max : 0,
+            avg = result.Count > 0 ? result.Sum / result.Count : 0
+        });
+    }
+
+    private static IResult GetMetricsProcessEvents(EventStore<MetricEvent> store, string? label)
+    {
+        var result = (Processed: 0, HighCpuCount: 0);
+        result = store.ProcessEvents(
+            result,
+            (ref (int Processed, int HighCpuCount) state, MetricEvent evt, DateTime? timestamp) =>
+            {
+                state.Processed++;
+                if ((label == null || evt.Label.Contains(label)) && evt.Value > 50)
+                {
+                    state.HighCpuCount++;
+                }
+                return true;
+            }
+        );
+        return Results.Ok(new { processed = result.Processed, highCpuCount = result.HighCpuCount });
     }
 
     // Administrative endpoints (simple, unsecured – secure before production)
