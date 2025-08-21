@@ -8,6 +8,10 @@ namespace LockFree.EventStore.Tests;
 
 public class BuffersTests
 {
+    private static readonly int[] ExpectedChunk1 = new[]{1,2,3,4};
+    private static readonly int[] ExpectedChunk2 = new[]{5,6,7,8};
+    private static readonly int[] ExpectedChunk3 = new[]{9,10};
+
     [Fact]
     public void Rent_And_Return_Arrays_Work()
     {
@@ -35,9 +39,9 @@ public class BuffersTests
         var list = new System.Collections.Generic.List<int[]>();
         Buffers.ProcessInChunks<int>(data, span => list.Add(span.ToArray()), chunkSize: 4);
         Assert.Equal(3, list.Count);
-        Assert.Equal(new[]{1,2,3,4}, list[0]);
-        Assert.Equal(new[]{5,6,7,8}, list[1]);
-        Assert.Equal(new[]{9,10}, list[2]);
+        Assert.Equal(ExpectedChunk1, list[0]);
+        Assert.Equal(ExpectedChunk2, list[1]);
+        Assert.Equal(ExpectedChunk3, list[2]);
     }
 
     [Theory]

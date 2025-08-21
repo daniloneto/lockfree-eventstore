@@ -4,10 +4,16 @@ using System.Linq;
 using LockFree.EventStore;
 using Xunit;
 
-namespace LockFree.EventStore.Tests;
-
-public class SpecializedEventStoreZeroAllocAndStatsTests
+namespace LockFree.EventStore.Tests
 {
+    public class SpecializedEventStoreZeroAllocAndStatsTests
+    {
+        // Campos static readonly para uso nos testes
+        public static readonly double[] ExpectedValues_153 = new[] { 0d, 2d, 4d, 6d, 8d };
+        public static readonly double[] ExpectedValues_157 = new[] { 4d, 6d, 8d };
+        public static readonly double[] ExpectedValues_161 = new[] { 0d, 2d, 4d };
+        public static readonly double[] ExpectedValues_FromOnly = new[] { 6d, 7d, 8d, 9d };
+        public static readonly double[] ExpectedValues_ToOnly = new[] { 0d, 1d, 2d, 3d };
     private static Event E(int key, double v, long t) => new(new KeyId(key), v, t);
 
     private static double[] Values(ReadOnlySpan<Event> span)
@@ -134,11 +140,11 @@ public class SpecializedEventStoreZeroAllocAndStatsTests
 
         var fromOnly = new List<double>();
         store.QueryZeroAlloc(span => fromOnly.AddRange(Values(span)), from: new DateTime(t0 + 6), chunkSize: 3);
-        Assert.Equal(new[] { 6d, 7d, 8d, 9d }, fromOnly.OrderBy(x => x).ToArray());
+        Assert.Equal(ExpectedValues_FromOnly, fromOnly.OrderBy(x => x).ToArray());
 
         var toOnly = new List<double>();
         store.QueryZeroAlloc(span => toOnly.AddRange(Values(span)), to: new DateTime(t0 + 3), chunkSize: 2);
-        Assert.Equal(new[] { 0d, 1d, 2d, 3d }, toOnly.OrderBy(x => x).ToArray());
+        Assert.Equal(ExpectedValues_ToOnly, toOnly.OrderBy(x => x).ToArray());
     }
 
     [Fact]
@@ -150,14 +156,15 @@ public class SpecializedEventStoreZeroAllocAndStatsTests
 
         var list = new List<double>();
         store.QueryByKeyZeroAlloc(new KeyId(5), span => list.AddRange(Values(span)), chunkSize: 4);
-        Assert.Equal(new[] { 0d, 2d, 4d, 6d, 8d }, list);
+        Assert.Equal(ExpectedValues_153, list);
 
         list.Clear();
         store.QueryByKeyZeroAlloc(new KeyId(5), span => list.AddRange(Values(span)), from: new DateTime(t0 + 4), chunkSize: 2);
-        Assert.Equal(new[] { 4d, 6d, 8d }, list);
+        Assert.Equal(ExpectedValues_157, list);
 
         list.Clear();
         store.QueryByKeyZeroAlloc(new KeyId(5), span => list.AddRange(Values(span)), to: new DateTime(t0 + 4), chunkSize: 3);
-        Assert.Equal(new[] { 0d, 2d, 4d }, list);
+        Assert.Equal(ExpectedValues_161, list);
+    }
     }
 }

@@ -8,8 +8,15 @@ namespace LockFree.EventStore.Tests;
 
 public class SpecializedEventStoreAdvancedTests
 {
-    private static Event E(int key, double v, long t) => new(new KeyId(key), v, t);
+    // Campos static readonly para uso nos testes
+    public static readonly double[] ExpectedValues_82 = new[] { 4d, 6d, 8d };
+    public static readonly double[] ExpectedValues_88 = new[] { 5d, 6d, 7d };
+    public static readonly double[] ExpectedValues_110 = new[] { 4d, 5d, 6d, 7d, 8d, 9d };
+    public static readonly double[] ExpectedValues_AllKey = new[] { 0d, 2d, 4d, 6d, 8d };
+    public static readonly double[] ExpectedValues_ToOnly = new[] { 0d, 2d, 4d };
+    public static readonly double[] ExpectedValues_ByRange = new[] { 4d, 6d };
 
+    private static Event E(int key, double v, long t) => new(new KeyId(key), v, t);
     private static double[] ValuesFrom(ReadOnlySpan<Event> span)
     {
         var arr = new double[span.Length];
@@ -70,22 +77,22 @@ public class SpecializedEventStoreAdvancedTests
         for (int i = 0; i < 10; i++) store.Add(E(i % 2 == 0 ? 7 : 8, i, t0 + i));
 
         var allKey = store.Query(key).Select(e => e.Value).ToArray();
-        Assert.Equal(new[] { 0d, 2d, 4d, 6d, 8d }, allKey);
+        Assert.Equal(ExpectedValues_AllKey, allKey);
 
         var fromOnly = store.Query(key, from: new DateTime(t0 + 4)).Select(e => e.Value).ToArray();
-        Assert.Equal(new[] { 4d, 6d, 8d }, fromOnly);
+        Assert.Equal(ExpectedValues_82, fromOnly);
 
         var toOnly = store.Query(key, to: new DateTime(t0 + 4)).Select(e => e.Value).ToArray();
-        Assert.Equal(new[] { 0d, 2d, 4d }, toOnly);
+        Assert.Equal(ExpectedValues_ToOnly, toOnly);
 
         var byRange = store.Query(key, new DateTime(t0 + 3), new DateTime(t0 + 7)).Select(e => e.Value).ToArray();
-        Assert.Equal(new[] { 4d, 6d }, byRange);
+        Assert.Equal(ExpectedValues_ByRange, byRange);
 
         var allByRange = store.Query(new DateTime(t0 + 5), new DateTime(t0 + 7))
             .Select(e => e.Value)
             .OrderBy(x => x)
             .ToArray();
-        Assert.Equal(new[] { 5d, 6d, 7d }, allByRange);
+        Assert.Equal(ExpectedValues_88, allByRange);
     }
 
     [Fact]
@@ -107,7 +114,8 @@ public class SpecializedEventStoreAdvancedTests
         chunks.Clear();
         store.QueryByKeyZeroAlloc(new KeyId(1), span => chunks.Add(ValuesFrom(span)),
             from: new DateTime(t0 + 4), to: new DateTime(t0 + 9), chunkSize: 3);
-        Assert.Equal(new[] { 4d, 5d, 6d, 7d, 8d, 9d }, chunks.SelectMany(x => x).ToArray());
+        Assert.Equal(ExpectedValues_110, chunks.SelectMany(x => x).ToArray());
+
         // Lock in chunk-size contract for ByKey path as well
         Assert.All(chunks, c => Assert.InRange(c.Length, 1, 3));
         var maxLen2 = chunks.Max(c => c.Length);

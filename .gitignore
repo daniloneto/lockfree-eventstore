@@ -49,3 +49,8 @@ coverage*
 *.ps1
 
 publish.sh
+
+# SonarScanner
+.sonarqube/
+
+sonar-issues.md

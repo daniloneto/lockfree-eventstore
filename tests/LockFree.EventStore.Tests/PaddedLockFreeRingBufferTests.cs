@@ -9,6 +9,12 @@ namespace LockFree.EventStore.Tests;
 
 public class PaddedLockFreeRingBufferTests
 {
+    private static readonly int[] ExpectedSnapshot345 = new[] { 3, 4, 5 };
+    private static readonly int[] Batch12345 = new[] { 1, 2, 3, 4, 5 };
+    private static readonly int[] Batch67 = new[] { 6, 7 };
+    private static readonly int[] ExpectedViewList = new[] { 1, 2, 3, 4 };
+    private static readonly double[] ExpectedFilteredValues = new[] { 1d, 2d, 3d };
+
     [Fact]
     public void TryEnqueue_Overwrite_Discard_Callback_Invoked()
     {
@@ -29,17 +35,17 @@ public class PaddedLockFreeRingBufferTests
         var arr = new int[3];
         var n = buf.Snapshot(arr);
         Assert.Equal(3, n);
-        Assert.Equal(new[] { 3, 4, 5 }, arr);
+        Assert.Equal(ExpectedSnapshot345, arr);
     }
 
     [Fact]
     public void TryEnqueueBatch_Wraps_And_Snapshots_In_Order()
     {
         var buf = new PaddedLockFreeRingBuffer<int>(5);
-        var written = buf.TryEnqueueBatch(new[] { 1, 2, 3, 4, 5 });
+        var written = buf.TryEnqueueBatch(Batch12345);
         Assert.Equal(5, written);
 
-        written = buf.TryEnqueueBatch(new[] { 6, 7 });
+        written = buf.TryEnqueueBatch(Batch67);
         Assert.Equal(2, written);
 
         var arr = new int[5];
@@ -59,7 +65,7 @@ public class PaddedLockFreeRingBufferTests
         Assert.Equal(4, view.Count);
         var list = new List<int>();
         foreach (var x in view) list.Add(x);
-        Assert.Equal(new[] { 1, 2, 3, 4 }, list);
+        Assert.Equal(ExpectedViewList, list);
     }
 
     [Fact]
@@ -74,7 +80,7 @@ public class PaddedLockFreeRingBufferTests
         Assert.Equal(3, view.Count);
         var items = new List<Event>();
         foreach (var e in view) items.Add(e);
-        Assert.Equal(new[] { 1d, 2d, 3d }, items.Select(e => e.Value));
+        Assert.Equal(ExpectedFilteredValues, items.Select(e => e.Value));
     }
 
     [Fact]

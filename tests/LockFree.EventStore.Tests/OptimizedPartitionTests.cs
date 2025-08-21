@@ -17,6 +17,13 @@ public class OptimizedPartitionTests
         return list;
     }
 
+    // Expected arrays (CA1861)
+    private static readonly double[] ExpectedFirst123 = new[] { 1d, 2d, 3d };
+    private static readonly double[] ExpectedWrap2To6 = new[] { 2d, 3d, 4d, 5d, 6d };
+    private static readonly double[] ExpectedBatch3To7 = new[] { 3d, 4d, 5d, 6d, 7d };
+    private static readonly double[] ExpectedView2To5 = new[] { 2d, 3d, 4d, 5d };
+    private static readonly double[] ExpectedSoAValues = new[] { 3d, 4d, 5d, 6d, 7d, 8d };
+
     [Fact]
     public void AoS_TryEnqueue_And_GetView_WrapAround_Order()
     {
@@ -27,7 +34,7 @@ public class OptimizedPartitionTests
         for (int i = 0; i < 3; i++) Assert.True(p.TryEnqueue(E(1, i + 1, t0 + i)));
         var view1 = p.GetView();
         Assert.Equal(3, view1.Count);
-        Assert.Equal(new[] { 1d, 2d, 3d }, Enumerate(view1).Select(e => e.Value).ToArray());
+        Assert.Equal(ExpectedFirst123, Enumerate(view1).Select(e => e.Value).ToArray());
 
         // Force wrap and overwrite
         p.TryEnqueue(E(1, 4, t0 + 3));
@@ -36,7 +43,7 @@ public class OptimizedPartitionTests
 
         var view2 = p.GetView();
         Assert.Equal(5, view2.Count);
-        Assert.Equal(new[] { 2d, 3d, 4d, 5d, 6d }, Enumerate(view2).Select(e => e.Value).ToArray());
+        Assert.Equal(ExpectedWrap2To6, Enumerate(view2).Select(e => e.Value).ToArray());
         Assert.True(discarded >= 1);
     }
 
@@ -51,7 +58,7 @@ public class OptimizedPartitionTests
         Assert.Equal(4, p.TryEnqueueBatch(second));
 
         var view = p.GetView();
-        Assert.Equal(new[] { 3d, 4d, 5d, 6d, 7d }, Enumerate(view).Select(e => e.Value).ToArray());
+        Assert.Equal(ExpectedBatch3To7, Enumerate(view).Select(e => e.Value).ToArray());
     }
 
     [Fact]
@@ -64,7 +71,7 @@ public class OptimizedPartitionTests
         // GetView constructs contiguous events
         var view = p.GetView();
         Assert.Equal(6, view.Count);
-        Assert.Equal(new[] { 3d, 4d, 5d, 6d, 7d, 8d }, Enumerate(view).Select(e => e.Value).ToArray());
+        Assert.Equal(ExpectedSoAValues, Enumerate(view).Select(e => e.Value).ToArray());
 
         // Direct spans (may copy on wrap); verify content only
         var keys = p.GetKeysSpan().ToArray();
@@ -103,13 +110,13 @@ public class OptimizedPartitionTests
         pAos.GetViewZeroAlloc(view =>
         {
             Assert.Equal(4, view.Count);
-            Assert.Equal(new[] { 2d, 3d, 4d, 5d }, Enumerate(view).Select(e => e.Value).ToArray());
+            Assert.Equal(ExpectedView2To5, Enumerate(view).Select(e => e.Value).ToArray());
         });
 
         pSoa.GetViewZeroAlloc(view =>
         {
             Assert.Equal(4, view.Count);
-            Assert.Equal(new[] { 2d, 3d, 4d, 5d }, Enumerate(view).Select(e => e.Value).ToArray());
+            Assert.Equal(ExpectedView2To5, Enumerate(view).Select(e => e.Value).ToArray());
         });
     }
 
