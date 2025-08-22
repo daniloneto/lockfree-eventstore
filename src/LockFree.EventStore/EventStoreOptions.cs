@@ -18,25 +18,19 @@ public sealed class EventStoreOptions<TEvent>
     /// <summary>
     /// Total capacity across all partitions. When set, takes precedence over CapacityPerPartition.
     /// </summary>
-    public int? Capacity
-    {
-        get => _capacity;
-        init
-        {
-            _capacity = value;
-            if (value.HasValue)
-            {
-                CapacityPerPartition = Math.Max(1, value.Value / Partitions);
-            }
-        }
-    }
-
-    private int? _capacity;
+    public int? Capacity { get; init; }
 
     /// <summary>
     /// Optional timestamp selector used for temporal queries.
     /// </summary>
     public IEventTimestampSelector<TEvent>? TimestampSelector { get; init; }
+
+    /// <summary>
+    /// Optional numeric value selector used to enable fast typed window aggregations (count/sum/min/max/avg).
+    /// When provided together with <see cref="WindowSizeTicks"/>, the store maintains per-partition bucketed aggregates
+    /// updated on append, enabling O(1) evict/apply during window advance.
+    /// </summary>
+    public Func<TEvent, double>? ValueSelector { get; init; }
 
     /// <summary>
     /// Optional callback invoked when an event is discarded due to capacity limits.
@@ -68,10 +62,21 @@ public sealed class EventStoreOptions<TEvent>
     public long? WindowSizeTicks { get; init; }
 
     /// <summary>
+    /// Number of time buckets kept per partition for fast window aggregations. Default: 512.
+    /// Total window coverage is approximately <see cref="BucketCount"/> * <see cref="BucketWidthTicks"/>.
+    /// </summary>
+    public int BucketCount { get; init; } = 512;
+
+    /// <summary>
+    /// Width of each time bucket in ticks. If not specified, it will be derived from WindowSizeTicks / BucketCount.
+    /// </summary>
+    public long? BucketWidthTicks { get; init; }
+
+    /// <summary>
     /// Gets the effective total capacity.
     /// </summary>
     public int GetTotalCapacity()
     {
-        return _capacity ?? (CapacityPerPartition * Partitions);
+        return Capacity ?? (CapacityPerPartition * Partitions);
     }
 }

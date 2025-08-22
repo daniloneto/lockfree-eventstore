@@ -1,9 +1,7 @@
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Numerics;
 using System.Threading;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Collections.Generic;
 
 namespace LockFree.EventStore;
@@ -292,6 +290,173 @@ public sealed class EventStore<TEvent>
             _options.OnCapacityReached?.Invoke();
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EnsureBucketsInitialized(int partitionIndex, ref PartitionWindowState state, long currentTimestamp)
+    {
+        if (!_options.WindowSizeTicks.HasValue) return;
+
+        if (state.Buckets == null)
+        {
+            var bucketCount = Math.Max(1, _options.BucketCount);
+            var windowSize = _options.WindowSizeTicks!.Value;
+            var bucketWidth = _options.BucketWidthTicks ?? Math.Max(1, windowSize / bucketCount);
+
+            state.BucketWidthTicks = bucketWidth;
+            state.Buckets = new AggregateBucket[bucketCount];
+
+            // Align window start and buckets to current time
+            var windowStartTicks = currentTimestamp - windowSize;
+            var firstBucketStart = windowStartTicks - ((windowStartTicks % bucketWidth + bucketWidth) % bucketWidth);
+            state.WindowStartTicks = windowStartTicks;
+            state.WindowEndTicks = currentTimestamp;
+
+            state.BucketHead = 0;
+            for (int i = 0; i < bucketCount; i++)
+            {
+                var start = firstBucketStart + (long)i * bucketWidth;
+                state.Buckets[i].Reset(start);
+            }
+
+            state.Count = 0;
+            state.Sum = 0.0;
+            state.Min = double.MaxValue;
+            state.Max = double.MinValue;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Mod(int x, int m)
+    {
+        var r = x % m;
+        return r < 0 ? r + m : r;
+    }
+
+    /// <summary>
+    /// Advances the window for a partition based on current timestamp and fixed window size.
+    /// Rolls the bucket ring forward and evicts buckets that have left the window.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void AdvancePartitionWindow(int partitionIndex, ref PartitionWindowState state, long currentTimestamp)
+    {
+        if (_ts == null || !_options.WindowSizeTicks.HasValue)
+            return;
+
+        EnsureBucketsInitialized(partitionIndex, ref state, currentTimestamp);
+        var windowSizeTicks = _options.WindowSizeTicks!.Value;
+        var bucketWidth = state.BucketWidthTicks;
+        var buckets = state.Buckets!;
+        var bucketCount = buckets.Length;
+
+        var newWindowStart = currentTimestamp - windowSizeTicks;
+        if (newWindowStart <= state.WindowStartTicks && currentTimestamp == state.WindowEndTicks)
+        {
+            // No forward progress
+            return;
+        }
+
+        // Compute how many whole buckets the window start advanced
+        var prevStart = state.WindowStartTicks;
+        var deltaTicks = newWindowStart - prevStart;
+
+        state.WindowStartTicks = newWindowStart;
+        state.WindowEndTicks = currentTimestamp;
+
+        if (deltaTicks <= 0)
+        {
+            // Window moved backward or stayed; do nothing (out-of-order append). We'll still accept event to appropriate bucket.
+            return;
+        }
+
+        int advanceBuckets = (int)(deltaTicks / bucketWidth);
+        if (advanceBuckets == 0)
+        {
+            // Advanced less than one bucket; nothing to evict yet
+            IncrementWindowAdvanceCount();
+            return;
+        }
+
+        if (advanceBuckets >= bucketCount)
+        {
+            // Window jumped beyond coverage; reset all buckets
+            for (int i = 0; i < bucketCount; i++)
+            {
+                buckets[i].Reset(newWindowStart - ((long)(bucketCount - i) * bucketWidth));
+            }
+            state.BucketHead = 0;
+            state.Count = 0;
+            state.Sum = 0.0;
+            state.Min = double.MaxValue;
+            state.Max = double.MinValue;
+            IncrementWindowAdvanceCount();
+            return;
+        }
+
+        // Evict 'advanceBuckets' buckets and reset them with new time ranges at the tail
+        for (int step = 0; step < advanceBuckets; step++)
+        {
+            // Evict the head bucket leaving the window
+            ref var evicted = ref buckets[state.BucketHead];
+            if (evicted.Count > 0)
+            {
+                state.Count -= evicted.Count;
+                state.Sum -= evicted.Sum;
+                // Min/Max potentially invalid now; will recompute after roll
+            }
+
+            // Move head forward
+            state.BucketHead = (state.BucketHead + 1) % bucketCount;
+
+            // Compute new bucket's start at the tail position
+            var newTailStart = newWindowStart + (long)(bucketCount - 1 - step) * bucketWidth;
+            ref var toReset = ref buckets[Mod(state.BucketHead + (bucketCount - 1), bucketCount)];
+            toReset.Reset(newTailStart);
+        }
+
+        // Recompute Min/Max across buckets inside the window
+        double min = double.MaxValue;
+        double max = double.MinValue;
+        for (int i = 0; i < bucketCount; i++)
+        {
+            ref var b = ref buckets[i];
+            if (b.Count == 0) continue;
+            if (b.Min < min) min = b.Min;
+            if (b.Max > max) max = b.Max;
+        }
+        state.Min = state.Count > 0 ? min : double.MaxValue;
+        state.Max = state.Count > 0 ? max : double.MinValue;
+
+        IncrementWindowAdvanceCount();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void UpdateBucketOnAppend(ref PartitionWindowState state, long eventTicks, double value)
+    {
+        var buckets = state.Buckets;
+        if (buckets == null)
+        {
+            return;
+        }
+
+        var windowStart = state.WindowStartTicks;
+        var windowEnd = state.WindowEndTicks;
+        if (eventTicks < windowStart || eventTicks > windowEnd)
+        {
+            // Outside current window; ignore for aggregate state
+            return;
+        }
+
+        var bucketWidth = state.BucketWidthTicks;
+        var offsetTicks = eventTicks - windowStart;
+        var bucketOffset = (int)(offsetTicks / bucketWidth);
+        var index = (state.BucketHead + bucketOffset) % buckets.Length;
+
+        // Update bucket
+        buckets[index].Add(value);
+
+        // Update partition aggregate
+        state.AddValue(value);
+    }
+
     /// <summary>
     /// Appends an event using the default partitioner.
     /// </summary>
@@ -337,6 +502,14 @@ public sealed class EventStore<TEvent>
                 var eventTimestamp = _ts.GetTimestamp(e);
                 ref var windowState = ref _windowStates[partition];
                 AdvancePartitionWindow(partition, ref windowState, eventTimestamp.Ticks);
+
+                // Fast typed path using ValueSelector if configured
+                var selector = _options.ValueSelector;
+                if (selector is not null)
+                {
+                    var value = selector(e);
+                    UpdateBucketOnAppend(ref windowState, eventTimestamp.Ticks, value);
+                }
             }
         }
         return result;
@@ -394,6 +567,13 @@ public sealed class EventStore<TEvent>
         {
             ref var windowState = ref _windowStates[partition];
             AdvancePartitionWindow(partition, ref windowState, timestamp);
+
+            var selector = _options.ValueSelector;
+            if (selector is not null)
+            {
+                var v = selector(value);
+                UpdateBucketOnAppend(ref windowState, timestamp, v);
+            }
         }
         return true;
     }
@@ -1623,34 +1803,6 @@ public sealed class EventStore<TEvent>
         {
             if (value < state.Min) state.Min = value;
             if (value > state.Max) state.Max = value;
-        }
-    }
-
-    /// <summary>
-    /// Advances the window for a partition based on current timestamp and fixed window size.
-    /// Removes events older than (currentTimestamp - WindowSizeTicks) from the window state.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void AdvancePartitionWindow(int partitionIndex, ref PartitionWindowState state, long currentTimestamp)
-    {
-        if (_ts == null) return;
-
-        var windowSizeTicks = _options.WindowSizeTicks ?? TimeSpan.FromMinutes(5).Ticks;
-        var windowStartTicks = currentTimestamp - windowSizeTicks;
-
-        var changed = state.WindowStartTicks != windowStartTicks || state.WindowEndTicks != currentTimestamp;
-        state.WindowStartTicks = windowStartTicks;
-        state.WindowEndTicks = currentTimestamp;
-
-        // Avoid reflection and scanning on append hot path. Reset aggregates; computation happens in zero-alloc queries.
-        state.Count = 0;
-        state.Sum = 0.0;
-        state.Min = double.MaxValue;
-        state.Max = double.MinValue;
-
-        if (changed)
-        {
-            IncrementWindowAdvanceCount();
         }
     }
 
