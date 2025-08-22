@@ -1,8 +1,8 @@
-namespace MetricsDashboard;
-
 using System.Diagnostics;
-using System.Linq;
+using System.Globalization;
 using LockFree.EventStore;
+
+namespace MetricsDashboard;
 
 internal static class Program
 {
@@ -37,35 +37,41 @@ internal static class Program
 
     private static void MapHealth(WebApplication app)
     {
-        app.MapGet("/health", () => Results.Ok("OK"));
+        _ = app.MapGet("/health", () => Results.Ok("OK"));
     }
 
     // --- Generic stream ingestion endpoints for Gateways ---
     private static void MapStreamRoutes(WebApplication app, EventStore<OrderEvent> orderStore)
     {
         // Append single event to a named stream
-        app.MapPost("/streams/{*stream}", (string stream, GatewayOrderCreated dto) =>
+        _ = app.MapPost("/streams/{*stream}", (string stream, GatewayOrderCreated dto) =>
         {
             var evt = new OrderEvent(dto.Id, stream, dto.GatewayId, dto.Valor, dto.Timestamp == default ? DateTime.UtcNow : dto.Timestamp.ToUniversalTime());
-            orderStore.TryAppend(evt);
+            _ = orderStore.TryAppend(evt);
             return Results.Accepted();
         });
 
         // Read all events of a stream (simple demo, no paging yet)
         // Aggregate per stream (optional helper used for consistency checks)
         // Re-map: /streams/{*stream}?aggregate=true
-        app.MapGet("/streams/{*stream}", (string stream, long? from, bool? aggregate) =>
+        _ = app.MapGet("/streams/{*stream}", (string stream, long? from, bool? aggregate) =>
         {
             if (aggregate == true)
             {
                 var start = Stopwatch.GetTimestamp();
                 var agg = new Dictionary<string, (int Count, long Sum)>();
-                orderStore.ProcessEvents(agg, (ref Dictionary<string, (int Count, long Sum)> state, OrderEvent e, DateTime? _) =>
+                agg = orderStore.ProcessEvents(agg, (ref Dictionary<string, (int Count, long Sum)> state, OrderEvent e, DateTime? _) =>
                 {
                     // Guard clause to reduce nesting
-                    if (e.Stream != stream) return true;
+                    if (e.Stream != stream)
+                    {
+                        return true;
+                    }
 
-                    if (!state.TryGetValue(e.GatewayId, out var val)) val = (0, 0);
+                    if (!state.TryGetValue(e.GatewayId, out var val))
+                    {
+                        val = (0, 0);
+                    }
                     val.Count++;
                     val.Sum += e.Valor;
                     state[e.GatewayId] = val;
@@ -80,10 +86,13 @@ internal static class Program
 
             // from ignored; return raw list
             var list = new List<GatewayOrderCreated>();
-            orderStore.ProcessEvents(list, (ref List<GatewayOrderCreated> acc, OrderEvent e, DateTime? ts) =>
+            list = orderStore.ProcessEvents(list, (ref List<GatewayOrderCreated> acc, OrderEvent e, DateTime? ts) =>
             {
                 // Guard clause to reduce nesting
-                if (e.Stream != stream) return true;
+                if (e.Stream != stream)
+                {
+                    return true;
+                }
 
                 acc.Add(new GatewayOrderCreated
                 {
@@ -100,35 +109,43 @@ internal static class Program
 
     private static void MapMetricsRoutes(WebApplication app, EventStore<MetricEvent> store)
     {
-        app.MapPost("/metrics", (MetricEvent m) => PostMetrics(store, m));
+        _ = app.MapPost("/metrics", (MetricEvent m) => PostMetrics(store, m));
 
-        app.MapGet("/metrics/sum", (DateTime? from, DateTime? to, string label) =>
+        _ = app.MapGet("/metrics/sum", (DateTime? from, DateTime? to, string label) =>
             GetMetricsSum(store, from, to, label));
 
-        app.MapGet("/metrics/sum-window", (string label, int minutes = 10) =>
+        _ = app.MapGet("/metrics/sum-window", (string label, int minutes = 10) =>
             GetMetricsSumWindow(store, label, minutes));
 
-        app.MapGet("/metrics/window", (DateTime? from, DateTime? to, string? label) =>
+        _ = app.MapGet("/metrics/window", (DateTime? from, DateTime? to, string? label) =>
             GetMetricsWindow(store, from, to, label));
 
-        app.MapGet("/metrics/snapshot-views", () => GetMetricsSnapshotViews(store));
+        _ = app.MapGet("/metrics/snapshot-views", () => GetMetricsSnapshotViews(store));
 
-        app.MapGet("/metrics/aggregate-zero-alloc", (DateTime? from, DateTime? to) =>
+        _ = app.MapGet("/metrics/aggregate-zero-alloc", (DateTime? from, DateTime? to) =>
             GetMetricsAggregateZeroAlloc(store, from, to));
 
-        app.MapGet("/metrics/process-events", (string? label) =>
+        _ = app.MapGet("/metrics/process-events", (string? label) =>
             GetMetricsProcessEvents(store, label));
     }
 
     private static IResult PostMetrics(EventStore<MetricEvent> store, MetricEvent m)
     {
-        store.TryAppend(m);
+        _ = store.TryAppend(m);
         return Results.Accepted();
     }
 
     private static IResult GetMetricsSum(EventStore<MetricEvent> store, DateTime? from, DateTime? to, string label)
     {
-        double sum = store.Aggregate(() => 0d, (acc, e) => e.Label == label ? acc + e.Value : acc, from: from, to: to);
+        // Prefer zero-alloc ProcessEvents to compute sum
+        var sum = store.ProcessEvents(0.0, (ref double s, MetricEvent e, DateTime? _) =>
+        {
+            if (e.Label == label)
+            {
+                s += e.Value;
+            }
+            return true;
+        }, null, from, to);
         return Results.Ok(sum);
     }
 
@@ -136,16 +153,21 @@ internal static class Program
     {
         var from = DateTime.UtcNow.AddMinutes(-minutes);
         var to = DateTime.UtcNow;
-        double sum = store.Aggregate(() => 0d, (acc, e) => e.Label == label ? acc + e.Value : acc, from: from, to: to);
+        var sum = store.ProcessEvents(0.0, (ref double s, MetricEvent e, DateTime? _) =>
+        {
+            if (e.Label == label)
+            {
+                s += e.Value;
+            }
+            return true;
+        }, null, from, to);
         return Results.Ok(sum);
     }
 
     private static IResult GetMetricsWindow(EventStore<MetricEvent> store, DateTime? from, DateTime? to, string? label)
     {
-        var predicate = label != null ? new Predicate<MetricEvent>(e => e.Label == label) : null;
-        var fromTicks = from?.Ticks ?? DateTime.MinValue.Ticks;
-        var toTicks = to?.Ticks ?? DateTime.MaxValue.Ticks;
-        var result = store.AggregateWindow(fromTicks, toTicks, predicate);
+        var filter = label is null ? null : new EventFilter<MetricEvent>((e, ts) => e.Label == label);
+        var result = store.AggregateWindowZeroAlloc(m => m.Value, filter, from, to);
         return Results.Ok(new
         {
             count = result.Count,
@@ -155,9 +177,9 @@ internal static class Program
             avg = result.Avg,
             window = new
             {
-                from = from?.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                to = to?.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                label = label
+                from = from?.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture),
+                to = to?.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture),
+                label
             }
         });
     }
@@ -169,7 +191,7 @@ internal static class Program
         return Results.Ok(new
         {
             partitions = views.Count,
-            totalEvents = totalEvents,
+            totalEvents,
             views = views.Select(v => new
             {
                 segmentCount = v.HasWrapAround ? 2 : 1,
@@ -194,8 +216,14 @@ internal static class Program
                 {
                     state.Sum += evt.Value;
                     state.Count++;
-                    if (evt.Value < state.Min) state.Min = evt.Value;
-                    if (evt.Value > state.Max) state.Max = evt.Value;
+                    if (evt.Value < state.Min)
+                    {
+                        state.Min = evt.Value;
+                    }
+                    if (evt.Value > state.Max)
+                    {
+                        state.Max = evt.Value;
+                    }
                 }
                 return true;
             },
@@ -234,9 +262,9 @@ internal static class Program
     // Administrative endpoints (simple, unsecured – secure before production)
     private static void MapAdminRoutes(WebApplication app, EventStore<MetricEvent> store, EventStore<OrderEvent> orderStore)
     {
-        app.MapPost("/admin/clear", () => { store.Clear(); orderStore.Clear(); return Results.Ok(new { cleared = true }); });
-        app.MapPost("/admin/reset", () => { store.Reset(); orderStore.Reset(); return Results.Ok(new { reset = true }); });
-        app.MapPost("/admin/purge", (int? olderThanMinutes, DateTime? olderThan) =>
+        _ = app.MapPost("/admin/clear", () => { store.Clear(); orderStore.Clear(); return Results.Ok(new { cleared = true }); });
+        _ = app.MapPost("/admin/reset", () => { store.Reset(); orderStore.Reset(); return Results.Ok(new { reset = true }); });
+        _ = app.MapPost("/admin/purge", (int? olderThanMinutes, DateTime? olderThan) =>
         {
             var cutoff = olderThan ?? DateTime.UtcNow.AddMinutes(-(olderThanMinutes ?? 60));
             try
@@ -254,7 +282,7 @@ internal static class Program
 }
 
 // DTOs and helpers in the same namespace
-internal class GatewayOrderCreated
+internal sealed class GatewayOrderCreated
 {
     public string Id { get; set; } = string.Empty;
     public int Valor { get; set; }
@@ -266,6 +294,13 @@ internal readonly record struct OrderEvent(string Id, string Stream, string Gate
 
 internal readonly struct OrderTimestampSelector : IEventTimestampSelector<OrderEvent>
 {
-    public DateTime GetTimestamp(OrderEvent e) => e.Timestamp;
-    public long GetTimestampTicks(OrderEvent e) => e.Timestamp.Ticks;
+    public DateTime GetTimestamp(OrderEvent e)
+    {
+        return e.Timestamp;
+    }
+
+    public long GetTimestampTicks(OrderEvent e)
+    {
+        return e.Timestamp.Ticks;
+    }
 }

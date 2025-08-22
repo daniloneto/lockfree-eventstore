@@ -15,4 +15,17 @@ jobs:
         with:
           dotnet-version: 9.0.x
       - run: dotnet build src/LockFree.EventStore/LockFree.EventStore.csproj -c Release
-      - run: dotnet test tests/LockFree.EventStore.Tests/LockFree.EventStore.Tests.csproj -c Release --no-build
+      - name: Test with coverage and threshold
+        run: |
+          dotnet test tests/LockFree.EventStore.Tests/LockFree.EventStore.Tests.csproj -c Release --no-build \
+            /p:CollectCoverage=true \
+            /p:CoverletOutputFormat=opencover \
+            /p:CoverletOutput=TestResults/coverage/ \
+            /p:Threshold=80 \
+            /p:ThresholdType=line \
+            /p:ThresholdStat=total
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: tests/LockFree.EventStore.Tests/TestResults/coverage/**

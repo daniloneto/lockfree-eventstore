@@ -53,4 +53,9 @@ publish.sh
 # SonarScanner
 .sonarqube/
 
-sonar-issues.md
+benchmarks/
+artifacts/
+
+local/
+
+.editorconfig

@@ -25,10 +25,13 @@ public sealed class EventStoreOptions<TEvent>
         {
             _capacity = value;
             if (value.HasValue)
+            {
                 CapacityPerPartition = Math.Max(1, value.Value / Partitions);
+            }
         }
     }
-    private readonly int? _capacity;
+
+    private int? _capacity;
 
     /// <summary>
     /// Optional timestamp selector used for temporal queries.
@@ -38,7 +41,9 @@ public sealed class EventStoreOptions<TEvent>
     /// <summary>
     /// Optional callback invoked when an event is discarded due to capacity limits.
     /// </summary>
-    public Action<TEvent>? OnEventDiscarded { get; init; }    /// <summary>
+    public Action<TEvent>? OnEventDiscarded { get; init; }
+
+    /// <summary>
     /// Optional callback invoked when the store reaches capacity.
     /// </summary>
     public Action? OnCapacityReached { get; init; }
@@ -54,7 +59,7 @@ public sealed class EventStoreOptions<TEvent>
     /// Improves performance in high-contention MPMC scenarios at the cost of memory usage.
     /// Default: false for compatibility.
     /// </summary>
-    public bool EnableFalseSharingProtection { get; init; } = false;
+    public bool EnableFalseSharingProtection { get; init; }
 
     /// <summary>
     /// Window size in ticks for incremental window aggregation.
@@ -65,5 +70,8 @@ public sealed class EventStoreOptions<TEvent>
     /// <summary>
     /// Gets the effective total capacity.
     /// </summary>
-    public int GetTotalCapacity() => _capacity ?? (CapacityPerPartition * Partitions);
+    public int GetTotalCapacity()
+    {
+        return _capacity ?? (CapacityPerPartition * Partitions);
+    }
 }

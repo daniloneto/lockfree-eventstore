@@ -7,20 +7,30 @@ namespace LockFree.EventStore;
 /// Using an integer instead of string reduces allocations and improves performance.
 /// </summary>
 public readonly record struct KeyId(int Value)
-{    /// <summary>
+{
+    /// <summary>
     /// Gets the hash code for partitioning purposes.
     /// </summary>
-    public override int GetHashCode() => Value;
-    
+    public override int GetHashCode()
+    {
+        return Value;
+    }
+
     /// <summary>
     /// Returns a string representation of the KeyId.
     /// </summary>
-    public override string ToString() => $"KeyId({Value})";
-    
+    public override string ToString()
+    {
+        return $"KeyId({Value})";
+    }
+
     /// <summary>
     /// Implicit conversion to int for convenience.
     /// </summary>
-    public static implicit operator int(KeyId keyId) => keyId.Value;
+    public static implicit operator int(KeyId keyId)
+    {
+        return keyId.Value;
+    }
 }
 
 /// <summary>
@@ -29,11 +39,9 @@ public readonly record struct KeyId(int Value)
 /// </summary>
 public sealed class KeyMap
 {
-    private readonly ConcurrentDictionary<string, KeyId> _stringToId = 
-        new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<KeyId, string> _idToString = 
-        new();
-    private int _nextId = 0;
+    private readonly ConcurrentDictionary<string, KeyId> _stringToId = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<KeyId, string> _idToString = new();
+    private int _nextId;
 
     /// <summary>
     /// Gets or creates a KeyId for the given string key.
@@ -44,7 +52,7 @@ public sealed class KeyMap
         return _stringToId.GetOrAdd(key, k =>
         {
             var keyId = new KeyId(Interlocked.Increment(ref _nextId));
-            _idToString.TryAdd(keyId, k);
+            _ = _idToString.TryAdd(keyId, k);
             return keyId;
         });
     }
@@ -52,17 +60,26 @@ public sealed class KeyMap
     /// <summary>
     /// Attempts to get the KeyId for a given string key.
     /// </summary>
-    public bool TryGet(string key, out KeyId id) => _stringToId.TryGetValue(key, out id);
+    public bool TryGet(string key, out KeyId id)
+    {
+        return _stringToId.TryGetValue(key, out id);
+    }
 
     /// <summary>
     /// Attempts to get the string key for a given KeyId.
     /// </summary>
-    public bool TryGet(KeyId id, out string? key) => _idToString.TryGetValue(id, out key);
+    public bool TryGet(KeyId id, out string? key)
+    {
+        return _idToString.TryGetValue(id, out key);
+    }
 
     /// <summary>
     /// Gets all registered key mappings.
     /// </summary>
-    public IReadOnlyDictionary<string, KeyId> GetAllMappings() => _stringToId.AsReadOnly();
+    public IReadOnlyDictionary<string, KeyId> GetAllMappings()
+    {
+        return _stringToId.AsReadOnly();
+    }
 
     /// <summary>
     /// Gets the current count of registered keys.
@@ -76,6 +93,6 @@ public sealed class KeyMap
     {
         _stringToId.Clear();
         _idToString.Clear();
-        Interlocked.Exchange(ref _nextId, 0);
+        _ = Interlocked.Exchange(ref _nextId, 0);
     }
 }

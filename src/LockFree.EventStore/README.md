@@ -6,6 +6,8 @@
 
 ---
 
+> Important: Prefer zero-allocation APIs introduced in vNext. Legacy Query-based APIs are kept for compatibility and marked as [Obsolete], delegating to zero-alloc implementations.
+
 ## 🚀 Get started in 3 steps
 
 ### 1. Run the server
