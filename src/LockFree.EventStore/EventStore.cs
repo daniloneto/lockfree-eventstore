@@ -22,11 +22,11 @@ public sealed class EventStore<TEvent>
     // Window state per partition for incremental aggregation
     private readonly PartitionWindowState[] _windowStates;
 
-    // Internal telemetry counters
-    private long _appendCount;
-    private long _droppedCount;
-    private long _snapshotBytesExposed;
-    private long _windowAdvanceCount;
+    // Internal telemetry counters (padded to minimize false sharing)
+    private PaddedLong _appendCount;
+    private PaddedLong _droppedCount;
+    private PaddedLong _snapshotBytesExposed;
+    private PaddedLong _windowAdvanceCount;
 
     /// <summary>
     /// Initializes a new instance with default options.
@@ -198,10 +198,10 @@ public sealed class EventStore<TEvent>
     private StoreStats GetCurrentStatsSnapshot()
     {
         return new StoreStats(
-            appendCount: Interlocked.Read(ref _appendCount),
-            droppedCount: Interlocked.Read(ref _droppedCount),
-            snapshotBytesExposed: Interlocked.Read(ref _snapshotBytesExposed),
-            windowAdvanceCount: Interlocked.Read(ref _windowAdvanceCount)
+            appendCount: Interlocked.Read(ref _appendCount.Value),
+            droppedCount: Interlocked.Read(ref _droppedCount.Value),
+            snapshotBytesExposed: Interlocked.Read(ref _snapshotBytesExposed.Value),
+            windowAdvanceCount: Interlocked.Read(ref _windowAdvanceCount.Value)
         );
     }
 
@@ -226,12 +226,47 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
-    /// Increments append count and notifies statistics update.
+    /// Increments append count and (optionally sampled) notifies statistics update.
+    /// Also updates public EventStoreStatistics to keep API behavior.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void IncrementAppendCount(int delta = 1)
     {
-        Interlocked.Add(ref _appendCount, delta);
-        NotifyStatsUpdated();
+        if (delta <= 0) return;
+
+        // Update internal counter
+        var newCount = Interlocked.Add(ref _appendCount.Value, delta);
+
+        // Update public statistics (single path for append accounting)
+        if (delta == 1)
+        {
+            _statistics.IncrementTotalAdded();
+        }
+        else
+        {
+            _statistics.IncrementTotalAdded(delta);
+        }
+
+        // Sampled notification on appends
+        var handler = _options.OnStatsUpdated;
+        if (handler is null)
+        {
+            return;
+        }
+
+        int interval = _options.StatsUpdateInterval;
+        if (interval <= 1)
+        {
+            NotifyStatsUpdated();
+            return;
+        }
+
+        // Notify only when crossing sampling boundaries
+        long prev = newCount - delta;
+        if ((prev / interval) != (newCount / interval))
+        {
+            NotifyStatsUpdated();
+        }
     }
 
     /// <summary>
@@ -239,8 +274,9 @@ public sealed class EventStore<TEvent>
     /// </summary>
     private void IncrementDroppedCount(int delta = 1)
     {
-        Interlocked.Add(ref _droppedCount, delta);
-        NotifyStatsUpdated();
+        Interlocked.Add(ref _droppedCount.Value, delta);
+        if (_options.OnStatsUpdated is not null)
+            NotifyStatsUpdated();
     }
 
     /// <summary>
@@ -248,8 +284,9 @@ public sealed class EventStore<TEvent>
     /// </summary>
     private void IncrementSnapshotBytesExposed(long delta)
     {
-        Interlocked.Add(ref _snapshotBytesExposed, delta);
-        NotifyStatsUpdated();
+        Interlocked.Add(ref _snapshotBytesExposed.Value, delta);
+        if (_options.OnStatsUpdated is not null)
+            NotifyStatsUpdated();
     }
 
     /// <summary>
@@ -257,8 +294,9 @@ public sealed class EventStore<TEvent>
     /// </summary>
     private void IncrementWindowAdvanceCount(int delta = 1)
     {
-        Interlocked.Add(ref _windowAdvanceCount, delta);
-        NotifyStatsUpdated();
+        Interlocked.Add(ref _windowAdvanceCount.Value, delta);
+        if (_options.OnStatsUpdated is not null)
+            NotifyStatsUpdated();
     }
 
     /// <summary>
@@ -479,7 +517,6 @@ public sealed class EventStore<TEvent>
     {
         if (!TryEnqueueToPartition(partition, e))
             return false;
-        _statistics.RecordAppend();
         IncrementAppendCount();
         return true;
     }
@@ -493,7 +530,6 @@ public sealed class EventStore<TEvent>
         if (!TryEnqueueToPartition(partition, e))
             return false;
 
-        _statistics.RecordAppend();
         IncrementAppendCount();
 
         // Check for window advancement if timestamp selector is available
@@ -602,7 +638,6 @@ public sealed class EventStore<TEvent>
         if (!TryEnqueueToPartition(partition, value))
             return false;
 
-        _statistics.RecordAppend();
         IncrementAppendCount();
 
         if (_options.EnableWindowTracking && _ts != null && _options.WindowSizeTicks.HasValue)
@@ -705,13 +740,7 @@ public sealed class EventStore<TEvent>
             throw new ArgumentOutOfRangeException(nameof(partition));
         }
         var written = TryEnqueueBatchToPartition(partition, batch);
-        // Update statistics
-        for (int i = 0; i < written; i++)
-        {
-            _statistics.RecordAppend();
-        }
-
-        // Update telemetry counter for successful appends
+        // Update telemetry counter for successful appends (and public statistics)
         IncrementAppendCount(written);
 
         return written;
@@ -818,11 +847,7 @@ public sealed class EventStore<TEvent>
             var written = TryEnqueueBatchToPartition(i, items);
             totalWritten += written;
 
-            // Update statistics and telemetry for the number of successfully appended items
-            for (int j = 0; j < written; j++)
-            {
-                _statistics.RecordAppend();
-            }
+            // Update telemetry for the number of successfully appended items (and public statistics)
             IncrementAppendCount(written);
         }
         return totalWritten;
@@ -1273,7 +1298,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Legacy Sum overload. Use SumZeroAlloc instead.
     /// </summary>
-    [Obsolete("Use SumZeroAlloc(selector, (e,t)=>..., from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
+    [Obsolete("Use SumZeroAlloc(selector, (e,t)=>..., from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%A2ncia")]
     public TValue Sum<TValue>(Func<TEvent, TValue> selector, DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
         where TValue : struct, INumber<TValue>
     {
@@ -1285,7 +1310,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Legacy Average overload. Use AverageZeroAlloc instead.
     /// </summary>
-    [Obsolete("Use AverageZeroAlloc(selector, (e,t)=>..., from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
+    [Obsolete("Use AverageZeroAlloc(selector, (e,t)=>..., from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%A2ncia")]
     public double Average(Func<TEvent, double> selector, DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
     {
         ArgumentNullException.ThrowIfNull(selector);
@@ -1296,7 +1321,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Legacy Average overload. Use AverageZeroAlloc instead.
     /// </summary>
-    [Obsolete("Use AverageZeroAlloc(selector, (e,t)=>..., from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
+    [Obsolete("Use AverageZeroAlloc(selector, (e,t)=>..., from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%A2ncia")]
     public double Average<TValue>(Func<TEvent, TValue> selector, DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
         where TValue : struct, INumber<TValue>
     {
@@ -1308,7 +1333,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Legacy Min overload. Use MinZeroAlloc instead.
     /// </summary>
-    [Obsolete("Use MinZeroAlloc(selector, (e,t)=>..., from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
+    [Obsolete("Use MinZeroAlloc(selector, (e,t)=>..., from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%A2ncia")]
     public TResult? Min<TResult>(Func<TEvent, TResult> selector, DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
         where TResult : struct, IComparable<TResult>
     {
@@ -1320,7 +1345,7 @@ public sealed class EventStore<TEvent>
     /// <summary>
     /// Legacy Max overload. Use MaxZeroAlloc instead.
     /// </summary>
-    [Obsolete("Use MaxZeroAlloc(selector, (e,t)=>..., from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
+    [Obsolete("Use MaxZeroAlloc(selector, (e,t)=>..., from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%A2ncia")]
     public TResult? Max<TResult>(Func<TEvent, TResult> selector, DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
         where TResult : struct, IComparable<TResult>
     {

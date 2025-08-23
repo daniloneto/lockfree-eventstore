@@ -79,6 +79,12 @@ public sealed class EventStoreOptions<TEvent>
     public bool EnableWindowTracking { get; init; } = true;
 
     /// <summary>
+    /// Interval for sampling stats notifications on appends. Notify every N appends. Default: 1.
+    /// Set to 1 to notify on every append (legacy behavior).
+    /// </summary>
+    public int StatsUpdateInterval { get; init; } = 1;
+
+    /// <summary>
     /// Gets the effective total capacity.
     /// </summary>
     public int GetTotalCapacity()
@@ -113,6 +119,11 @@ public sealed class EventStoreOptions<TEvent>
             {
                 throw new ArgumentException("WindowSizeTicks must be an exact multiple of BucketWidthTicks when both are specified.", nameof(WindowSizeTicks));
             }
+        }
+
+        if (StatsUpdateInterval <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(StatsUpdateInterval), "StatsUpdateInterval must be greater than zero.");
         }
     }
 }
