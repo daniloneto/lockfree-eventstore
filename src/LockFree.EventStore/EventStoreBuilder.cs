@@ -10,6 +10,7 @@ public sealed class EventStoreBuilder<TEvent>
     private Action<TEvent>? _onEventDiscarded;
     private Action? _onCapacityReached;
     private IEventTimestampSelector<TEvent>? _timestampSelector;
+    private bool? _enableWindowTracking; // RFC 002: expose runtime flag
 
     /// <summary>
     /// Sets the total capacity across all partitions.
@@ -57,6 +58,17 @@ public sealed class EventStoreBuilder<TEvent>
     }
 
     /// <summary>
+    /// Enables or disables runtime window tracking (bucket maintenance on append).
+    /// When disabled, appends bypass all window/bucket logic and time-filtered window queries will throw.
+    /// Default is enabled.
+    /// </summary>
+    public EventStoreBuilder<TEvent> WithEnableWindowTracking(bool enabled)
+    {
+        _enableWindowTracking = enabled;
+        return this;
+    }
+
+    /// <summary>
     /// Creates the EventStore with the configured options.
     /// </summary>
     public EventStore<TEvent> Create()
@@ -67,7 +79,9 @@ public sealed class EventStoreBuilder<TEvent>
             Partitions = _partitions ?? Environment.ProcessorCount,
             OnEventDiscarded = _onEventDiscarded,
             OnCapacityReached = _onCapacityReached,
-            TimestampSelector = _timestampSelector        };
+            TimestampSelector = _timestampSelector,
+            EnableWindowTracking = _enableWindowTracking ?? true
+        };
 
         return new EventStore<TEvent>(options);
     }

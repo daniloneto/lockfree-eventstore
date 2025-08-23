@@ -73,6 +73,12 @@ public sealed class EventStoreOptions<TEvent>
     public long? BucketWidthTicks { get; init; }
 
     /// <summary>
+    /// Enables or disables runtime window tracking (bucket maintenance on append).
+    /// Default: true. When false, appends bypass all window/bucket logic and window aggregations are unavailable.
+    /// </summary>
+    public bool EnableWindowTracking { get; init; } = true;
+
+    /// <summary>
     /// Gets the effective total capacity.
     /// </summary>
     public int GetTotalCapacity()

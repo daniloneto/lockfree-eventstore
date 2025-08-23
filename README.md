@@ -7,6 +7,16 @@
 
 ---
 
+## RFC 002: Flag de Rastreamento de Janela em Tempo de Execução
+- Nova opção `EventStoreOptions<TEvent>.EnableWindowTracking` (padrão: true).
+- Quando false: o append ignora toda manutenção de janelas/buckets. Indicado para cenários de AppendOnly e Snapshot.
+- Quando true: habilita consultas por janela temporal e buckets por partição (quando configurados) para agregações rápidas.
+- Proteção: qualquer consulta por janela com tempo (from/to) com tracking desativado lança InvalidOperationException com a mensagem: "Window tracking is disabled. EnableWindowTracking must be true to use window queries."
+- Builder fluente: `EventStore.For<T>().WithEnableWindowTracking(bool)`.
+- Benchmarks (equidade):
+  - AppendOnly / AppendWithSnapshot → `EnableWindowTracking = false`
+  - WindowAggregate / MixedHotCold → `EnableWindowTracking = true`
+
 ## 🚀 Comece em 3 passos
 
 ### 1. Suba o servidor
@@ -111,7 +121,9 @@ var store = new EventStore<Pedido>(new EventStoreOptions<Pedido>
     Particoes = 16,
     OnEventDiscarded = evt => Logger.LogTrace("Evento descartado: {Event}", evt),
     OnCapacityReached = () => Metrics.IncrementCounter("eventstore.capacidade_atingida"),
-    TimestampSelector = new PedidoTimestampSelector()
+    TimestampSelector = new PedidoTimestampSelector(),
+    // RFC 002: desative tracking quando não precisar de janelas
+    EnableWindowTracking = false
 });
 
 // API fluente
@@ -121,6 +133,8 @@ var store = EventStore.For<Pedido>()
     .OnDiscarded(evt => Log(evt))
     .OnCapacityReached(() => NotificarAdmin())
     .WithTimestampSelector(new PedidoTimestampSelector())
+    // RFC 002
+    .WithEnableWindowTracking(false)
     .Create();
 ```
 
@@ -156,6 +170,8 @@ var filteredSum = store.Sum(
     to: fim
 );
 ```
+
+Nota: Consultas temporais (from/to) exigem `EnableWindowTracking = true`. Quando desativado, será lançada InvalidOperationException: "Window tracking is disabled. EnableWindowTracking must be true to use window queries."
 
 ## Snapshots com Filtros
 ```csharp
@@ -250,14 +266,6 @@ Projetado para alta concorrência e baixa latência. A ordem global entre parti�
 **Conclusões:**
 1. Tipos por valor são significativamente mais rápidos que tipos por referência para leitura e escrita.
 2. SoA melhora cache locality e reduz pressão de memória.
-3. Para alto throughput, a implementação `EventStoreV2` é recomendada.
-
-```csharp
-// Usando EventStoreV2 com tipos por valor
-var store = new EventStoreV2(capacidade: 1_000_000, particoes: 16);
-store.Add("sensor1", 25.5, DateTime.UtcNow.Ticks);
-double media = store.Average("sensor1");
-```
 
 ## Limitações
 - Ordem global apenas aproximada entre partições

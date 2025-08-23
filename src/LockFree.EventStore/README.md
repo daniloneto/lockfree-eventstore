@@ -112,7 +112,9 @@ var store = new EventStore<Pedido>(new EventStoreOptions<Pedido>
     Particoes = 16,
     OnEventDiscarded = evt => Logger.LogTrace("Event discarded: {Event}", evt),
     OnCapacityReached = () => Metrics.IncrementCounter("eventstore.capacity_reached"),
-    TimestampSelector = new PedidoTimestampSelector()
+    TimestampSelector = new PedidoTimestampSelector(),
+    // RFC 002: disable window tracking for pure append/snapshot workloads
+    EnableWindowTracking = false
 });
 
 // Fluent API
@@ -122,6 +124,8 @@ var store = EventStore.For<Pedido>()
     .OnDiscarded(evt => Log(evt))
     .OnCapacityReached(() => NotifyAdmin())
     .WithTimestampSelector(new PedidoTimestampSelector())
+    // RFC 002: opt-out when window queries are not used
+    .WithEnableWindowTracking(false)
     .Create();
 ```
 
@@ -157,6 +161,8 @@ var filteredSum = store.Sum(
     to: fim
 );
 ```
+
+Note: Time-filtered queries require `EnableWindowTracking = true`. When disabled, a clear InvalidOperationException is thrown: "Window tracking is disabled. EnableWindowTracking must be true to use window queries."
 
 ## Snapshots with Filters
 ```csharp
@@ -252,14 +258,6 @@ Designed for high concurrency and low latency. Global order across partitions is
 **Conclusions:**
 1. Value types are significantly faster than reference types for reads and writes.
 2. SoA improves cache locality and reduces memory pressure.
-3. For high throughput, the `EventStoreV2` implementation is recommended.
-
-```csharp
-// Using EventStoreV2 with value types
-var store = new EventStoreV2(capacidade: 1_000_000, particoes: 16);
-store.Add("sensor1", 25.5, DateTime.UtcNow.Ticks);
-double media = store.Average("sensor1");
-```
 
 ## Limitations
 - Global order is only approximate across partitions

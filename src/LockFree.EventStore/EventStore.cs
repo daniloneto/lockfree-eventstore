@@ -458,6 +458,61 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
+    /// Ensures window tracking is enabled when a time-filtered window query is requested.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EnsureWindowTrackingEnabledIfTimeFiltered(DateTime? from, DateTime? to)
+    {
+        if (!_options.EnableWindowTracking && (from.HasValue || to.HasValue))
+        {
+            throw new InvalidOperationException("Window tracking is disabled. EnableWindowTracking must be true to use window queries.");
+        }
+    }
+
+    /// <summary>
+    /// Core append without any window tracking. Hot-path minimal work only.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool TryAppendCoreFast(TEvent e, int partition)
+    {
+        if (!TryEnqueueToPartition(partition, e))
+            return false;
+        _statistics.RecordAppend();
+        IncrementAppendCount();
+        return true;
+    }
+
+    /// <summary>
+    /// Core append maintaining window tracking state when configured.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool TryAppendWithWindow(TEvent e, int partition)
+    {
+        if (!TryEnqueueToPartition(partition, e))
+            return false;
+
+        _statistics.RecordAppend();
+        IncrementAppendCount();
+
+        // Check for window advancement if timestamp selector is available
+        if (_ts != null && _options.WindowSizeTicks.HasValue)
+        {
+            var eventTimestamp = _ts.GetTimestamp(e);
+            ref var windowState = ref _windowStates[partition];
+            AdvancePartitionWindow(partition, ref windowState, eventTimestamp.Ticks);
+
+            // Fast typed path using ValueSelector if configured
+            var selector = _options.ValueSelector;
+            if (selector is not null)
+            {
+                var value = selector(e);
+                UpdateBucketOnAppend(ref windowState, eventTimestamp.Ticks, value);
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Appends an event using the default partitioner.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -490,29 +545,15 @@ public sealed class EventStore<TEvent>
     {
         if ((uint)partition >= (uint)GetPartitionCount())
             throw new ArgumentOutOfRangeException(nameof(partition));
-        var result = TryEnqueueToPartition(partition, e);
-        if (result)
+
+        if (!_options.EnableWindowTracking)
         {
-            _statistics.RecordAppend();
-            IncrementAppendCount();
-
-            // Check for window advancement if timestamp selector is available
-            if (_ts != null && _options.WindowSizeTicks.HasValue)
-            {
-                var eventTimestamp = _ts.GetTimestamp(e);
-                ref var windowState = ref _windowStates[partition];
-                AdvancePartitionWindow(partition, ref windowState, eventTimestamp.Ticks);
-
-                // Fast typed path using ValueSelector if configured
-                var selector = _options.ValueSelector;
-                if (selector is not null)
-                {
-                    var value = selector(e);
-                    UpdateBucketOnAppend(ref windowState, eventTimestamp.Ticks, value);
-                }
-            }
+            return TryAppendCoreFast(e, partition);
         }
-        return result;
+        else
+        {
+            return TryAppendWithWindow(e, partition);
+        }
     }
 
     /// <summary>
@@ -556,14 +597,13 @@ public sealed class EventStore<TEvent>
     public bool TryAppend(KeyId keyId, TEvent value, long timestamp)
     {
         var partition = Partitioners.ForKeyIdSimple(keyId, GetPartitionCount());
-        // Use provided timestamp; do not delegate to the non-timestamp overload
         if (!TryEnqueueToPartition(partition, value))
             return false;
 
         _statistics.RecordAppend();
         IncrementAppendCount();
 
-        if (_ts != null && _options.WindowSizeTicks.HasValue)
+        if (_options.EnableWindowTracking && _ts != null && _options.WindowSizeTicks.HasValue)
         {
             ref var windowState = ref _windowStates[partition];
             AdvancePartitionWindow(partition, ref windowState, timestamp);
@@ -1118,6 +1158,10 @@ public sealed class EventStore<TEvent>
     [Obsolete("Use AggregateWindowZeroAlloc(selector, filter, from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
     public WindowAggregateResult AggregateWindow(long fromTicks, long toTicks, Predicate<TEvent>? filter = null)
     {
+        // Guard: disallow time-filtered window queries when tracking is disabled
+        if (!_options.EnableWindowTracking && (fromTicks != long.MinValue || toTicks != long.MaxValue))
+            throw new InvalidOperationException("Window tracking is disabled. EnableWindowTracking must be true to use window queries.");
+
         var globalResult = new WindowAggregateState();
         var partitionCount = GetPartitionCount();
         for (int i = 0; i < partitionCount; i++)
@@ -1134,6 +1178,9 @@ public sealed class EventStore<TEvent>
     [Obsolete("Use AggregateWindowZeroAlloc(selector, filter, from, to). See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
     public WindowAggregateResult AggregateWindow(DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
     {
+        // Guard: disallow time-filtered window queries when tracking is disabled
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+
         var fromTicks = from?.Ticks ?? long.MinValue;
         var toTicks = to?.Ticks ?? long.MaxValue;
         return AggregateWindow(fromTicks, toTicks, filter);
@@ -1146,6 +1193,8 @@ public sealed class EventStore<TEvent>
     public TResult SumWindow<TResult>(Func<TEvent, TResult> selector, DateTime? from = null, DateTime? to = null, Predicate<TEvent>? filter = null)
         where TResult : struct, INumber<TResult>
     {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+
         var sum = TResult.Zero;
         var fromTicks = from?.Ticks ?? 0;
         var toTicks = to?.Ticks ?? DateTime.MaxValue.Ticks;
@@ -1291,7 +1340,10 @@ public sealed class EventStore<TEvent>
     /// <returns>Total number of matching events.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public long CountEventsZeroAlloc(EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
-        => ZeroAllocationExtensions.CountEventsZeroAlloc(this, filter, from, to);
+    {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+        return ZeroAllocationExtensions.CountEventsZeroAlloc(this, filter, from, to);
+    }
 
     /// <summary>
     /// Sums numeric values using a generic selector without allocations.
@@ -1299,7 +1351,10 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public TValue SumZeroAlloc<TValue>(Func<TEvent, TValue> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
         where TValue : struct, INumber<TValue>
-        => ZeroAllocationExtensions.SumZeroAlloc(this, selector, filter, from, to);
+    {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+        return ZeroAllocationExtensions.SumZeroAlloc(this, selector, filter, from, to);
+    }
 
     /// <summary>
     /// Computes average using a generic numeric selector without allocations.
@@ -1307,7 +1362,10 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public double AverageZeroAlloc<TValue>(Func<TEvent, TValue> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
         where TValue : struct, INumber<TValue>
-        => ZeroAllocationExtensions.AverageZeroAlloc(this, selector, filter, from, to);
+    {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+        return ZeroAllocationExtensions.AverageZeroAlloc(this, selector, filter, from, to);
+    }
 
     /// <summary>
     /// Finds minimum value using a selector without allocations.
@@ -1315,7 +1373,10 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public TResult? MinZeroAlloc<TResult>(Func<TEvent, TResult> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
         where TResult : struct, IComparable<TResult>
-        => ZeroAllocationExtensions.MinZeroAlloc(this, selector, filter, from, to);
+    {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+        return ZeroAllocationExtensions.MinZeroAlloc(this, selector, filter, from, to);
+    }
 
     /// <summary>
     /// Finds maximum value using a selector without allocations.
@@ -1323,7 +1384,10 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public TResult? MaxZeroAlloc<TResult>(Func<TEvent, TResult> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
         where TResult : struct, IComparable<TResult>
-        => ZeroAllocationExtensions.MaxZeroAlloc(this, selector, filter, from, to);
+    {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+        return ZeroAllocationExtensions.MaxZeroAlloc(this, selector, filter, from, to);
+    }
 
     /// <summary>
     /// Performs window aggregation using a zero-allocation pipeline and a double selector.
@@ -1336,6 +1400,8 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public WindowAggregateResult AggregateWindowZeroAlloc(Func<TEvent, double> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
     {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+
         // Fast-path: bucket-based aggregation when no filter and window bounds are provided and covered
         if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && _ts is not null && _options.WindowSizeTicks.HasValue)
         {
@@ -1391,6 +1457,8 @@ public sealed class EventStore<TEvent>
     public WindowAggregateResult AggregateWindowZeroAlloc<TValue>(Func<TEvent, TValue> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
         where TValue : struct, INumber<TValue>
     {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+
         // Keep generic path; fast path relies on ValueSelector which is double-typed.
         var state = ZeroAllocationExtensions.ProcessEventsChunked<TEvent, (long Count, double Sum, double Min, double Max, bool Has)>(
             this,
@@ -1897,6 +1965,9 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public WindowAggregateResult AggregateFromBuckets(DateTime from, DateTime to)
     {
+        if (!_options.EnableWindowTracking)
+            throw new InvalidOperationException("Window tracking is disabled. EnableWindowTracking must be true to use window queries.");
+
         var fromTicks = from.Ticks;
         var toTicks = to.Ticks;
         if (toTicks < fromTicks)
@@ -2011,6 +2082,8 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public double? MinZeroAlloc(Func<TEvent, double> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
     {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+
         if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && _ts is not null && _options.WindowSizeTicks.HasValue)
         {
             if (CanUseBucketFastPath(from.Value, to.Value))
@@ -2028,6 +2101,8 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public double? MaxZeroAlloc(Func<TEvent, double> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
     {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+
         if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && _ts is not null && _options.WindowSizeTicks.HasValue)
         {
             if (CanUseBucketFastPath(from.Value, to.Value))
@@ -2045,6 +2120,8 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public double SumZeroAlloc(Func<TEvent, double> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
     {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+
         if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && _ts is not null && _options.WindowSizeTicks.HasValue)
         {
             if (CanUseBucketFastPath(from.Value, to.Value))
@@ -2062,6 +2139,8 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public double AverageZeroAlloc(Func<TEvent, double> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
     {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+
         if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && _ts is not null && _options.WindowSizeTicks.HasValue)
         {
             if (CanUseBucketFastPath(from.Value, to.Value))
