@@ -85,4 +85,34 @@ public sealed class EventStoreOptions<TEvent>
     {
         return Capacity ?? (CapacityPerPartition * Partitions);
     }
+
+    /// <summary>
+    /// Validates bucket-related configuration to fail fast on invalid settings.
+    /// </summary>
+    public void Validate()
+    {
+        if (BucketCount <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(BucketCount), "BucketCount must be greater than zero.");
+        }
+
+        if (BucketWidthTicks.HasValue && BucketWidthTicks.Value <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(BucketWidthTicks), "BucketWidthTicks must be greater than zero when specified.");
+        }
+
+        if (WindowSizeTicks.HasValue && BucketWidthTicks.HasValue)
+        {
+            var window = WindowSizeTicks.Value;
+            var width = BucketWidthTicks.Value;
+            if (window < width)
+            {
+                throw new ArgumentException("WindowSizeTicks must be greater than or equal to BucketWidthTicks when both are specified.", nameof(WindowSizeTicks));
+            }
+            if (window % width != 0)
+            {
+                throw new ArgumentException("WindowSizeTicks must be an exact multiple of BucketWidthTicks when both are specified.", nameof(WindowSizeTicks));
+            }
+        }
+    }
 }

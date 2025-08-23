@@ -53,7 +53,9 @@ public sealed class EventStore<TEvent>
     /// </summary>
     public EventStore(EventStoreOptions<TEvent>? options)
     {
-        _options = options ?? new EventStoreOptions<TEvent>();
+        var opts = options ?? new EventStoreOptions<TEvent>();
+        opts.Validate();
+        _options = opts;
         if (_options.Partitions <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "Partitions must be greater than zero.");
         _statistics = new EventStoreStatistics();

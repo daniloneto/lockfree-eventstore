@@ -83,6 +83,7 @@ public sealed class EventStoreBuilder<TEvent>
             EnableWindowTracking = _enableWindowTracking ?? true
         };
 
+        options.Validate();
         return new EventStore<TEvent>(options);
     }
 }
