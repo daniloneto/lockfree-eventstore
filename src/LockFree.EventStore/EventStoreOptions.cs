@@ -81,6 +81,7 @@ public sealed class EventStoreOptions<TEvent>
     /// <summary>
     /// Interval for sampling stats notifications on appends. Notify every N appends. Default: 1.
     /// Set to 1 to notify on every append (legacy behavior).
+    /// For high-throughput scenarios, prefer a power-of-two value like 1024, 2048 or 4096 so the check uses a fast bitmask.
     /// </summary>
     public int StatsUpdateInterval { get; init; } = 1;
 
@@ -99,12 +100,13 @@ public sealed class EventStoreOptions<TEvent>
     {
         if (BucketCount <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(BucketCount), "BucketCount must be greater than zero.");
+            // Use ArgumentOutOfRangeException with null paramName to avoid referencing non-parameters
+            throw new ArgumentOutOfRangeException(null, "BucketCount must be greater than zero.");
         }
 
         if (BucketWidthTicks.HasValue && BucketWidthTicks.Value <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(BucketWidthTicks), "BucketWidthTicks must be greater than zero when specified.");
+            throw new ArgumentOutOfRangeException(null, "BucketWidthTicks must be greater than zero when specified.");
         }
 
         if (WindowSizeTicks.HasValue && BucketWidthTicks.HasValue)
@@ -113,17 +115,17 @@ public sealed class EventStoreOptions<TEvent>
             var width = BucketWidthTicks.Value;
             if (window < width)
             {
-                throw new ArgumentException("WindowSizeTicks must be greater than or equal to BucketWidthTicks when both are specified.", nameof(WindowSizeTicks));
+                throw new ArgumentException("WindowSizeTicks must be greater than or equal to BucketWidthTicks when both are specified.");
             }
             if (window % width != 0)
             {
-                throw new ArgumentException("WindowSizeTicks must be an exact multiple of BucketWidthTicks when both are specified.", nameof(WindowSizeTicks));
+                throw new ArgumentException("WindowSizeTicks must be an exact multiple of BucketWidthTicks when both are specified.");
             }
         }
 
         if (StatsUpdateInterval <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(StatsUpdateInterval), "StatsUpdateInterval must be greater than zero.");
+            throw new ArgumentOutOfRangeException(null, "StatsUpdateInterval must be greater than zero.");
         }
     }
 }

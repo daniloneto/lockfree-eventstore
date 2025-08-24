@@ -34,6 +34,123 @@ public static class ZeroAllocationExtensions
         return filter(evt, ts);
     }
 
+    // Time window detection helper
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool HasTimeRange(DateTime? from, DateTime? to)
+    {
+        return from.HasValue || to.HasValue;
+    }
+
+    // No-filter fast path: either whole snapshot or time-bounded snapshot.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TState ProcessNoFilterChunked<TEvent, TState>(
+        EventStore<TEvent> store,
+        TState state,
+        Func<TState, ReadOnlySpan<TEvent>, TState> chunkProcessor,
+        DateTime? from,
+        DateTime? to,
+        bool hasTime,
+        int chunkSize)
+    {
+        if (hasTime)
+        {
+            store.SnapshotTimeFilteredZeroAlloc(from, to, chunk =>
+            {
+                state = chunkProcessor(state, chunk);
+            }, chunkSize);
+        }
+        else
+        {
+            store.SnapshotZeroAlloc(chunk =>
+            {
+                state = chunkProcessor(state, chunk);
+            }, chunkSize);
+        }
+
+        return state;
+    }
+
+    // Filtered, no time bounds: let the ring buffer filter.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TState ProcessWithFilterNoTime<TEvent, TState>(
+        EventStore<TEvent> store,
+        TState state,
+        Func<TState, ReadOnlySpan<TEvent>, TState> chunkProcessor,
+        EventFilter<TEvent> filter,
+        int chunkSize)
+    {
+        store.SnapshotFilteredZeroAlloc(evt =>
+        {
+            var timestamp = store.TimestampSelector?.GetTimestamp(evt);
+            return filter(evt, timestamp);
+        }, chunk =>
+        {
+            state = chunkProcessor(state, chunk);
+        }, chunkSize);
+
+        return state;
+    }
+
+    // Filtered with time bounds: stream time-filtered chunks, then apply filter into a pooled scratch buffer.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TState ProcessWithFilterAndTime<TEvent, TState>(
+        EventStore<TEvent> store,
+        TState state,
+        Func<TState, ReadOnlySpan<TEvent>, TState> chunkProcessor,
+        EventFilter<TEvent> filter,
+        DateTime? from,
+        DateTime? to,
+        int chunkSize)
+    {
+        var pool = ArrayPool<TEvent>.Shared;
+        var scratch = pool.Rent(chunkSize);
+        try
+        {
+            store.SnapshotTimeFilteredZeroAlloc(from, to, chunk =>
+            {
+                var n = FilterChunkIntoScratch(chunk, filter, store.TimestampSelector, ref scratch, pool);
+                if (n > 0)
+                {
+                    state = chunkProcessor(state, scratch.AsSpan(0, n));
+                }
+            }, chunkSize);
+        }
+        finally
+        {
+            pool.Return(scratch, clearArray: false);
+        }
+
+        return state;
+    }
+
+    // Copies filtered events from chunk into scratch buffer, resizing from the pool if necessary.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int FilterChunkIntoScratch<TEvent>(
+        ReadOnlySpan<TEvent> chunk,
+        EventFilter<TEvent> filter,
+        IEventTimestampSelector<TEvent>? tsSelector,
+        ref TEvent[] scratch,
+        ArrayPool<TEvent> pool)
+    {
+        var n = 0;
+        for (var i = 0; i < chunk.Length; i++)
+        {
+            var evt = chunk[i];
+            if (PassesFilter(filter, tsSelector, evt))
+            {
+                if (n >= scratch.Length)
+                {
+                    var old = scratch;
+                    scratch = pool.Rent(Math.Max(old.Length * 2, n + 1));
+                    old.AsSpan(0, n).CopyTo(scratch);
+                    pool.Return(old, clearArray: false);
+                }
+                scratch[n++] = evt;
+            }
+        }
+        return n;
+    }
+
     /// <summary>
     /// Processes all events in the store using a zero-allocation callback approach.
     /// No intermediate collections are created.
@@ -148,79 +265,13 @@ public static class ZeroAllocationExtensions
         int chunkSize = Buffers.DefaultChunkSize)
     {
         var state = initialState;
-        var hasTime = from.HasValue || to.HasValue;
+        var hasTime = HasTimeRange(from, to);
 
-        if (filter is null)
-        {
-            if (hasTime)
-            {
-                store.SnapshotTimeFilteredZeroAlloc(from, to, chunk =>
-                {
-                    state = chunkProcessor(state, chunk);
-                }, chunkSize);
-            }
-            else
-            {
-                store.SnapshotZeroAlloc(chunk =>
-                {
-                    state = chunkProcessor(state, chunk);
-                }, chunkSize);
-            }
-        }
-        else
-        {
-            if (!hasTime)
-            {
-                // Let the ring buffer perform the filtering, then process chunks.
-                store.SnapshotFilteredZeroAlloc(evt =>
-                {
-                    var timestamp = store.TimestampSelector?.GetTimestamp(evt);
-                    return filter(evt, timestamp);
-                }, chunk =>
-                {
-                    state = chunkProcessor(state, chunk);
-                }, chunkSize);
-            }
-            else
-            {
-                // Time window present: stream time-filtered chunks and apply filter using a pooled scratch buffer.
-                var pool = ArrayPool<TEvent>.Shared;
-                var scratch = pool.Rent(chunkSize);
-                try
-                {
-                    store.SnapshotTimeFilteredZeroAlloc(from, to, chunk =>
-                    {
-                        var n = 0;
-                        for (var i = 0; i < chunk.Length; i++)
-                        {
-                            var evt = chunk[i];
-                            if (PassesFilter(filter, store.TimestampSelector, evt))
-                            {
-                                if (n >= scratch.Length)
-                                {
-                                    // Expand scratch if necessary (rare); rent a larger buffer.
-                                    var old = scratch;
-                                    scratch = pool.Rent(Math.Max(old.Length * 2, n + 1));
-                                    old.AsSpan(0, n).CopyTo(scratch);
-                                    pool.Return(old, clearArray: false);
-                                }
-                                scratch[n++] = evt;
-                            }
-                        }
-                        if (n > 0)
-                        {
-                            state = chunkProcessor(state, scratch.AsSpan(0, n));
-                        }
-                    }, chunkSize);
-                }
-                finally
-                {
-                    pool.Return(scratch, clearArray: false);
-                }
-            }
-        }
-
-        return state;
+        return filter is null
+            ? ProcessNoFilterChunked(store, state, chunkProcessor, from, to, hasTime, chunkSize)
+            : (!hasTime
+                ? ProcessWithFilterNoTime(store, state, chunkProcessor, filter, chunkSize)
+                : ProcessWithFilterAndTime(store, state, chunkProcessor, filter, from, to, chunkSize));
     }
 
     /// <summary>

@@ -154,7 +154,7 @@ public class SpecializedEventStoreAdvancedTests
 
         var purged = store.Purge(new DateTime(t0 + 5));
         Assert.True(purged >= 5);
-        Assert.All(store.Query(), e => Assert.True(e.TimestampTicks >= t0 + 5));
+        Assert.All(store.EnumerateSnapshot(), e => Assert.True(e.TimestampTicks >= t0 + 5));
     }
 
     [Fact]

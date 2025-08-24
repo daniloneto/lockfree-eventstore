@@ -23,7 +23,9 @@ public static class Partitioners
     public static int ForKey(Event e, int partitions)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
-        return e.Key.Value % partitions;
+        return PerformanceHelpers.IsPowerOfTwo(partitions)
+            ? PerformanceHelpers.FastMod(e.Key.Value, partitions)
+            : e.Key.Value % partitions;
     }
 
     /// <summary>
@@ -34,11 +36,9 @@ public static class Partitioners
     public static int ForKeyId(KeyId keyId, int partitions)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
-        
+
         // Use fast bitmask when partitions is a power of two; otherwise fallback to modulo
-        if (PerformanceHelpers.IsPowerOfTwo(partitions))
-            return PerformanceHelpers.FastMod(keyId.Value, partitions);
-        return keyId.Value % partitions;
+        return PerformanceHelpers.IsPowerOfTwo(partitions) ? PerformanceHelpers.FastMod(keyId.Value, partitions) : keyId.Value % partitions;
     }
 
     /// <summary>

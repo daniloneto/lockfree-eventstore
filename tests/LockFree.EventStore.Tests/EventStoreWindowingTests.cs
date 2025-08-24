@@ -28,7 +28,7 @@ public class EventStoreWindowingTests
         store.TryAppend(new Order(3, 5m, now.AddMinutes(-3)));  // in
         store.TryAppend(new Order(4, 30m, now.AddMinutes(-2))); // in
 
-        var res = store.AggregateWindow(now.AddMinutes(-5), now);
+        var res = store.AggregateWindowZeroAlloc(o => (double)o.Amount, from: now.AddMinutes(-5), to: now);
         Assert.Equal(3, res.Count);
         Assert.Equal(55, (int)res.Sum);
         Assert.Equal(5, (int)res.Min);
@@ -46,8 +46,8 @@ public class EventStoreWindowingTests
         store.TryAppend(new Order(3, 5m, now.AddMinutes(-3)));  // in
         store.TryAppend(new Order(4, 30m, now.AddMinutes(-2))); // in
 
-        var sum = store.SumWindow(o => o.Amount, now.AddMinutes(-5), now, e => e.Amount >= 10m);
-        Assert.Equal(50m, sum);
+        var sum = store.SumZeroAlloc(o => (double)o.Amount, from: now.AddMinutes(-5), to: now, filter: (e, _) => e.Amount >= 10m);
+        Assert.Equal(50.0, sum);
     }
 
     [Fact]
