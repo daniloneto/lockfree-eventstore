@@ -181,7 +181,7 @@ public class EventStoreAdditionalCoverageTests
         store.SnapshotZeroAlloc(span => { seen += span.Length; }, chunkSize: 2);
 
         Assert.Equal(5, seen);
-        Assert.True(stats.Any(s => s.SnapshotBytesExposed > 0));
+        Assert.Contains(stats, s => s.SnapshotBytesExposed > 0);
     }
 
     [Fact]

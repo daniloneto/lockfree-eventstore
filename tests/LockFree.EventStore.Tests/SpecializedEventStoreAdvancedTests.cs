@@ -76,23 +76,46 @@ public class SpecializedEventStoreAdvancedTests
         // Insert across keys and times
         for (int i = 0; i < 10; i++) store.Add(E(i % 2 == 0 ? 7 : 8, i, t0 + i));
 
-        var allKey = store.Query(key).Select(e => e.Value).ToArray();
-        Assert.Equal(ExpectedValues_AllKey, allKey);
+        // All by key
+        var allKeyVals = new List<double>();
+        store.QueryByKeyZeroAlloc(key, span =>
+        {
+            for (int i = 0; i < span.Length; i++) allKeyVals.Add(span[i].Value);
+        });
+        Assert.Equal(ExpectedValues_AllKey, allKeyVals.ToArray());
 
-        var fromOnly = store.Query(key, from: new DateTime(t0 + 4)).Select(e => e.Value).ToArray();
-        Assert.Equal(ExpectedValues_82, fromOnly);
+        // From only
+        var fromOnlyVals = new List<double>();
+        store.QueryByKeyZeroAlloc(key, span =>
+        {
+            for (int i = 0; i < span.Length; i++) fromOnlyVals.Add(span[i].Value);
+        }, from: new DateTime(t0 + 4));
+        Assert.Equal(ExpectedValues_82, fromOnlyVals.ToArray());
 
-        var toOnly = store.Query(key, to: new DateTime(t0 + 4)).Select(e => e.Value).ToArray();
-        Assert.Equal(ExpectedValues_ToOnly, toOnly);
+        // To only
+        var toOnlyVals = new List<double>();
+        store.QueryByKeyZeroAlloc(key, span =>
+        {
+            for (int i = 0; i < span.Length; i++) toOnlyVals.Add(span[i].Value);
+        }, to: new DateTime(t0 + 4));
+        Assert.Equal(ExpectedValues_ToOnly, toOnlyVals.ToArray());
 
-        var byRange = store.Query(key, new DateTime(t0 + 3), new DateTime(t0 + 7)).Select(e => e.Value).ToArray();
-        Assert.Equal(ExpectedValues_ByRange, byRange);
+        // By range
+        var byRangeVals = new List<double>();
+        store.QueryByKeyZeroAlloc(key, span =>
+        {
+            for (int i = 0; i < span.Length; i++) byRangeVals.Add(span[i].Value);
+        }, from: new DateTime(t0 + 3), to: new DateTime(t0 + 7));
+        Assert.Equal(ExpectedValues_ByRange, byRangeVals.ToArray());
 
-        var allByRange = store.Query(new DateTime(t0 + 5), new DateTime(t0 + 7))
-            .Select(e => e.Value)
-            .OrderBy(x => x)
-            .ToArray();
-        Assert.Equal(ExpectedValues_88, allByRange);
+        // All by range across partitions
+        var allByRangeVals = new List<double>();
+        store.QueryZeroAlloc(span =>
+        {
+            for (int i = 0; i < span.Length; i++) allByRangeVals.Add(span[i].Value);
+        }, from: new DateTime(t0 + 5), to: new DateTime(t0 + 7));
+        var ordered = allByRangeVals.OrderBy(x => x).ToArray();
+        Assert.Equal(ExpectedValues_88, ordered);
     }
 
     [Fact]
