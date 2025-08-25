@@ -14,7 +14,21 @@ public static class Partitioners
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
         return (int)((uint)HashCode.Combine(key) % partitions);
-    }    /// <summary>
+    }
+
+    /// <summary>
+    /// Specialized overload for Event to avoid generic hashing. Uses KeyId directly.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int ForKey(Event e, int partitions)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
+        return PerformanceHelpers.IsPowerOfTwo(partitions)
+            ? PerformanceHelpers.FastMod(e.Key.Value, partitions)
+            : e.Key.Value % partitions;
+    }
+
+    /// <summary>
     /// Maps a KeyId to a partition index using optimized integer arithmetic.
     /// This is the hot path version that avoids string hashing.
     /// </summary>
@@ -22,11 +36,9 @@ public static class Partitioners
     public static int ForKeyId(KeyId keyId, int partitions)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
-        
+
         // Use fast bitmask when partitions is a power of two; otherwise fallback to modulo
-        if (PerformanceHelpers.IsPowerOfTwo(partitions))
-            return PerformanceHelpers.FastMod(keyId.Value, partitions);
-        return keyId.Value % partitions;
+        return PerformanceHelpers.IsPowerOfTwo(partitions) ? PerformanceHelpers.FastMod(keyId.Value, partitions) : keyId.Value % partitions;
     }
 
     /// <summary>

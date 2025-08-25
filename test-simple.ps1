@@ -86,16 +86,6 @@ try {
     Write-Host "Erro na soma tradicional: $($_.Exception.Message)" -ForegroundColor Red
 }
 
-# 6. Testar top métricas
-Write-Host "`n5. Testando top métricas..." -ForegroundColor Yellow
-try {
-    $top = Invoke-RestMethod -Uri "$baseUrl/metrics/top?k=3" -Method GET
-    Write-Host "Top 3:" -ForegroundColor Green
-    $top | Format-Table
-} catch {
-    Write-Host "Erro no top: $($_.Exception.Message)" -ForegroundColor Red
-}
-
 # 7. Cleanup
 Write-Host "`nTeste concluído!" -ForegroundColor Green
 Write-Host "`nParando servidor..." -ForegroundColor Yellow

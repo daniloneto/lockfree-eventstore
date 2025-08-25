@@ -82,8 +82,11 @@ public sealed class PaddedLockFreeRingBuffer<T>
     /// </summary>
     public int TryEnqueueBatch(ReadOnlySpan<T> items)
     {
-        if (items.IsEmpty) return 0;
-        
+        if (items.IsEmpty)
+        {
+            return 0;
+        }
+
         var batchSize = items.Length;
         var newTail = Interlocked.Add(ref _header.Tail, batchSize);
         var startIndex = newTail - batchSize;
@@ -136,8 +139,11 @@ public sealed class PaddedLockFreeRingBuffer<T>
         var tail = Volatile.Read(ref _header.Tail);
         var count = (int)Math.Min(destination.Length, Math.Min(Capacity, tail - head));
         
-        if (count <= 0) return 0;
-        
+        if (count <= 0)
+        {
+            return 0;
+        }
+
         for (int i = 0; i < count; i++)
         {
             var index = (head + i) % Capacity;
@@ -193,7 +199,9 @@ public sealed class PaddedLockFreeRingBuffer<T>
             state = result.State;
             
             if (!result.Continue)
+            {
                 break; // Early termination
+            }
         }
         
         finalState = state;
@@ -287,8 +295,10 @@ public sealed class PaddedLockFreeRingBuffer<T>
             var endEpoch = Volatile.Read(ref _header.Epoch);
             
             if (startEpoch != endEpoch)
+            {
                 continue;
-            
+            }
+
             return CreateFilteredViewFromRange(head, tail, fromTicks, toTicks, timestampSelector);
         }
         
@@ -328,7 +338,10 @@ public sealed class PaddedLockFreeRingBuffer<T>
             if (itemTicks >= fromTicks && itemTicks <= toTicks)
             {
                 if (validStart == -1)
+                {
                     validStart = i;
+                }
+
                 validEnd = i;
                 validCount++;
             }
@@ -399,7 +412,10 @@ public sealed class PaddedLockFreeRingBuffer<T>
         var len = Snapshot(tmp);
         var results = new List<T>(len);
         for (int i = 0; i < len; i++)
+        {
             results.Add(tmp[i]);
+        }
+
         return results;
     }
 }

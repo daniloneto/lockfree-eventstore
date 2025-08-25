@@ -1,5 +1,4 @@
 using System.Runtime.CompilerServices;
-using System.Threading;
 
 namespace LockFree.EventStore;
 
@@ -17,10 +16,15 @@ internal static class PerformanceHelpers
     internal static void FastCopySpan<T>(ReadOnlySpan<T> source, Span<T> destination)
     {
         if (source.Length != destination.Length)
+        {
             throw new ArgumentException("Source and destination spans must have the same length");
-            
-        if (source.IsEmpty) return;
-        
+        }
+
+        if (source.IsEmpty)
+        {
+            return;
+        }
+
         // Use built-in optimized copy
         source.CopyTo(destination);
     }
@@ -52,13 +56,15 @@ internal static class PerformanceHelpers
     internal static void BoundsCheck(uint index, uint length)
     {
         if (index >= length)
-            ThrowIndexOutOfRange();
+        {
+            ThrowArgumentOutOfRange(index, length);
+        }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void ThrowIndexOutOfRange()
+    private static void ThrowArgumentOutOfRange(uint index, uint length)
     {
-        throw new IndexOutOfRangeException();
+        throw new ArgumentOutOfRangeException(nameof(index), $"Index {index} out of range [0, {length}).");
     }
 
     /// <summary>
@@ -68,9 +74,9 @@ internal static class PerformanceHelpers
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static int FastMod(int value, int powerOfTwoDivisor)
     {
-        if (powerOfTwoDivisor <= 0 || !IsPowerOfTwo(powerOfTwoDivisor))
-            throw new ArgumentOutOfRangeException(nameof(powerOfTwoDivisor), "Divisor must be a positive power of two.");
-        return value & (powerOfTwoDivisor - 1);
+        return !IsPowerOfTwo(powerOfTwoDivisor)
+            ? throw new ArgumentOutOfRangeException(nameof(powerOfTwoDivisor), "Divisor must be a positive power of two.")
+            : value & (powerOfTwoDivisor - 1);
     }
 
     /// <summary>
@@ -80,16 +86,25 @@ internal static class PerformanceHelpers
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static long FastMod(long value, long powerOfTwoDivisor)
     {
-        if (powerOfTwoDivisor <= 0 || (powerOfTwoDivisor & (powerOfTwoDivisor - 1)) != 0)
-            throw new ArgumentOutOfRangeException(nameof(powerOfTwoDivisor), "Divisor must be a positive power of two.");
-        return value & (powerOfTwoDivisor - 1);
+        return !IsPowerOfTwo(powerOfTwoDivisor)
+            ? throw new ArgumentOutOfRangeException(nameof(powerOfTwoDivisor), "Divisor must be a positive power of two.")
+            : value & (powerOfTwoDivisor - 1);
     }
 
     /// <summary>
-    /// Checks if a number is a power of 2.
+    /// Checks if a number is a power of 2 (int).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static bool IsPowerOfTwo(int value)
+    {
+        return value > 0 && (value & (value - 1)) == 0;
+    }
+
+    /// <summary>
+    /// Checks if a number is a power of 2 (long).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool IsPowerOfTwo(long value)
     {
         return value > 0 && (value & (value - 1)) == 0;
     }
@@ -100,8 +115,11 @@ internal static class PerformanceHelpers
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static int RoundUpToPowerOfTwo(int value)
     {
-        if (value <= 1) return 1;
-        
+        if (value <= 1)
+        {
+            return 1;
+        }
+
         value--;
         value |= value >> 1;
         value |= value >> 2;
@@ -109,7 +127,7 @@ internal static class PerformanceHelpers
         value |= value >> 8;
         value |= value >> 16;
         value++;
-        
+
         return value;
     }
 }

@@ -42,7 +42,9 @@ public sealed class EnhancedFeaturesTests
 
         Assert.Equal(100, store.Capacity);
         Assert.Equal(2, store.Partitions);
-    }    [Fact]
+    }
+
+    [Fact]
     public void Count_WithTimeWindow_ReturnsCorrectCount()
     {
         var store = new EventStore<Order>(new EventStoreOptions<Order>
@@ -56,7 +58,7 @@ public sealed class EnhancedFeaturesTests
         store.TryAppend(new Order(2, 20m, now.AddMinutes(-3)));
         store.TryAppend(new Order(3, 30m, now.AddMinutes(-1)));
 
-        var count = store.CountEvents(from: now.AddMinutes(-4), to: now.AddMinutes(-2));
+        var count = store.CountEventsZeroAlloc(from: now.AddMinutes(-4), to: now.AddMinutes(-2));
         Assert.Equal(1, count);
     }
 
@@ -69,8 +71,8 @@ public sealed class EnhancedFeaturesTests
         store.TryAppend(new Order(2, 20m, DateTime.UtcNow));
         store.TryAppend(new Order(3, 30m, DateTime.UtcNow));
 
-        var sum = store.Sum(o => o.Amount);
-        Assert.Equal(60m, sum);
+        var sum = store.SumZeroAlloc(o => (double)o.Amount);
+        Assert.Equal(60.0, sum);
     }
 
     [Fact]
@@ -82,8 +84,8 @@ public sealed class EnhancedFeaturesTests
         store.TryAppend(new Order(2, 20m, DateTime.UtcNow));
         store.TryAppend(new Order(3, 30m, DateTime.UtcNow));
 
-        var sum = store.Sum(o => o.Amount, filter: o => o.Amount >= 20m);
-        Assert.Equal(50m, sum);
+        var sum = store.SumZeroAlloc(o => (double)o.Amount, filter: (e, _) => e.Amount >= 20m);
+        Assert.Equal(50.0, sum);
     }
 
     [Fact]
@@ -95,7 +97,7 @@ public sealed class EnhancedFeaturesTests
         store.TryAppend(new Order(2, 20m, DateTime.UtcNow));
         store.TryAppend(new Order(3, 30m, DateTime.UtcNow));
 
-        var avg = store.Average(o => o.Amount);
+        var avg = store.AverageZeroAlloc(o => (double)o.Amount);
         Assert.Equal(20.0, avg);
     }
 
@@ -108,11 +110,11 @@ public sealed class EnhancedFeaturesTests
         store.TryAppend(new Order(2, 20m, DateTime.UtcNow));
         store.TryAppend(new Order(3, 30m, DateTime.UtcNow));
 
-        var min = store.Min(o => o.Amount);
-        var max = store.Max(o => o.Amount);
+        var min = store.MinZeroAlloc(o => (double)o.Amount);
+        var max = store.MaxZeroAlloc(o => (double)o.Amount);
         
-        Assert.Equal(10m, min);
-        Assert.Equal(30m, max);
+        Assert.Equal(10.0, min);
+        Assert.Equal(30.0, max);
     }
 
     [Fact]
@@ -124,7 +126,7 @@ public sealed class EnhancedFeaturesTests
         store.TryAppend(new Order(2, 20m, DateTime.UtcNow));
         store.TryAppend(new Order(3, 30m, DateTime.UtcNow));
 
-        var snapshot = store.Snapshot(o => o.Amount >= 20m);
+        var snapshot = store.Snapshot(e => e.Amount >= 20m);
         Assert.Equal(2, snapshot.Count);
     }
 
@@ -154,7 +156,9 @@ public sealed class EnhancedFeaturesTests
         store.Reset();
         
         Assert.True(store.IsEmpty);
-    }    [Fact]
+    }
+
+    [Fact]
     public void Statistics_TracksMetrics()
     {
         var store = new EventStore<Order>();
@@ -175,7 +179,9 @@ public sealed class EnhancedFeaturesTests
         {
             TimestampSelector = new OrderTimestampSelector(),
             CapacityPerPartition = 100
-        });        var now = DateTime.UtcNow;
+        });
+
+        var now = DateTime.UtcNow;
         store.TryAppend(new Order(1, 10m, now.AddHours(-2))); // Old
         store.TryAppend(new Order(2, 20m, now.AddMinutes(-30))); // Recent
         store.TryAppend(new Order(3, 30m, now.AddMinutes(-10))); // Recent
@@ -183,7 +189,9 @@ public sealed class EnhancedFeaturesTests
         store.Purge(olderThan: now.AddHours(-1));
 
         Assert.Equal(2, store.Count);
-    }    [Fact]
+    }
+
+    [Fact]
     public void AggregateWithFilter_UsesFilterCorrectly()
     {
         var store = new EventStore<Order>();
@@ -192,10 +200,9 @@ public sealed class EnhancedFeaturesTests
         store.TryAppend(new Order(2, 20m, DateTime.UtcNow));
         store.TryAppend(new Order(3, 30m, DateTime.UtcNow));
 
-        var result = store.Aggregate(
-            () => new { Count = 0, Sum = 0m },
-            (acc, evt) => new { Count = acc.Count + 1, Sum = acc.Sum + evt.Amount },
-            new Predicate<Order>(evt => evt.Amount >= 20m)
+        var result = store.AggregateZeroAlloc(
+            new { Count = 0, Sum = 0m },
+            (acc, evt) => evt.Amount >= 20m ? new { Count = acc.Count + 1, Sum = acc.Sum + evt.Amount } : acc
         );
 
         Assert.Equal(2, result.Count);

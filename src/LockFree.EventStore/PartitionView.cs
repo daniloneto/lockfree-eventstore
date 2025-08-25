@@ -10,8 +10,8 @@ namespace LockFree.EventStore;
 public readonly record struct PartitionView<T>(
     ReadOnlyMemory<T> Segment1,
     ReadOnlyMemory<T> Segment2, // for wrap-around case; may be empty
-    int Count, 
-    long FromTicks, 
+    int Count,
+    long FromTicks,
     long ToTicks)
 {
     /// <summary>
@@ -39,10 +39,9 @@ public readonly record struct PartitionView<T>(
     /// </summary>
     public ReadOnlySpan<T> AsSpan()
     {
-        if (HasWrapAround)
-            throw new InvalidOperationException("Cannot create a single span from a wrapped partition view. Use GetEnumerator() instead.");
-        
-        return Segment1.Span;
+        return HasWrapAround
+            ? throw new InvalidOperationException("Cannot create a single span from a wrapped partition view. Use GetEnumerator() instead.")
+            : Segment1.Span;
     }
 }
 
@@ -51,8 +50,8 @@ public readonly record struct PartitionView<T>(
 /// </summary>
 public ref struct PartitionViewEnumerator<T>
 {
-    private ReadOnlySpan<T> _segment1;
-    private ReadOnlySpan<T> _segment2;
+    private readonly ReadOnlySpan<T> _segment1;
+    private readonly ReadOnlySpan<T> _segment2;
     private int _currentIndex;
     private bool _inSecondSegment;
 
@@ -71,12 +70,7 @@ public ref struct PartitionViewEnumerator<T>
     public readonly T Current
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get
-        {
-            if (_inSecondSegment)
-                return _segment2[_currentIndex];
-            return _segment1[_currentIndex];
-        }
+        get => _inSecondSegment ? _segment2[_currentIndex] : _segment1[_currentIndex];
     }
 
     /// <summary>
@@ -89,7 +83,9 @@ public ref struct PartitionViewEnumerator<T>
         {
             _currentIndex++;
             if (_currentIndex < _segment1.Length)
+            {
                 return true;
+            }
 
             // Switch to second segment if available
             if (_segment2.Length > 0)

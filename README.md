@@ -2,10 +2,82 @@
 [![CI](https://github.com/daniloneto/lockfree-eventstore/actions/workflows/ci.yml/badge.svg)](https://github.com/daniloneto/lockfree-eventstore/actions)
 [![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.EventStore)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=daniloneto_lockfree-eventstore&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=daniloneto_lockfree-eventstore)
-#
-**Um banco de eventos em memória, rodando como serviço, para sincronizar e validar operações entre múltiplas instâncias com alta concorrência e sem travas.**
+
+# LockFree.EventStore
+
+Um armazenador de eventos em memória, super rápido, **sem travas (lock-free)**, com partições e suporte a consultas por janelas de tempo.
 
 ---
+
+## ✨ O que é
+
+Pense em uma fila onde várias pessoas colocam bilhetes (eventos).  
+Cada bilhete tem uma **chave** (quem enviou) e um **horário** (quando chegou).
+
+O **LockFree.EventStore** organiza esses bilhetes de forma eficiente e previsível, pronto para cenários de alta velocidade.
+
+---
+
+## 🚀 O que ele faz de especial
+
+- **Guardar eventos muito rápido**  
+  Em vez de uma lista única e gigante, divide em **partições por chave**.  
+  Isso reduz a concorrência e aumenta a velocidade.
+
+- **Esquecer automaticamente os mais antigos**  
+  Cada partição tem **tamanho fixo**.  
+  Quando enche, os eventos mais antigos são descartados.  
+  Mantém o sistema leve e sempre pronto.
+
+- **Consultas por tempo (janelas)**  
+  Perguntas como:  
+  - “Quantos eventos chegaram nos últimos 5 segundos?”  
+  - “Qual foi o valor máximo nos últimos 10 segundos?”  
+
+  São respondidas rápido graças a **buckets de tempo** que guardam estatísticas (`count`, `sum`, `min`, `max`).
+
+- **Zero lixo de memória (GC-free)**  
+  Evita gerar objetos desnecessários para não acionar o coletor de lixo (GC).  
+
+  Técnicas usadas:  
+  - Reaproveitamento de arrays (`ArrayPool`)  
+  - Uso de blocos de memória (`Span<T>`, `ReadOnlySpan<T>`)  
+  - Nada de LINQ/reflection em caminhos críticos  
+
+---
+
+## ⚙️ Como funciona
+
+### ➕ Adicionar evento (append)
+1. Descobre a partição correta pela chave.  
+2. Insere no próximo espaço livre (ou substitui o mais antigo).  
+3. Atualiza os **buckets de tempo** se o recurso de janela estiver ligado.  
+
+### 🔍 Consultar janela (window query)
+1. Em vez de ler todos os eventos, pega apenas os **buckets** do intervalo.  
+2. Junta as estatísticas e responde quase de imediato.  
+
+---
+
+## 🏆 Por que importa
+
+Em sistemas de **alta velocidade** (bolsa de valores, jogos online, IoT), cada microssegundo conta.  
+
+Essa biblioteca mostra como pensar em **estruturas de dados** e no uso consciente da memória para garantir **desempenho previsível**.
+
+> Princípio: **não guarde mais do que precisa**.  
+> Se só importam os últimos X segundos, não faz sentido acumular meses de histórico.
+
+---
+
+## 👉 Essência
+
+O **LockFree.EventStore** é:
+
+**ephemeral & fast — rápido, previsível e focado apenas no que realmente importa.**
+
+---
+
 
 ## 🚀 Comece em 3 passos
 
@@ -99,28 +171,32 @@ var total = store.Aggregate(() => 0m, (acc, e) => acc + e.Valor,
 ## Novos Construtores
 ```csharp
 // Capacidade explícita
-var store = new EventStore<Pedido>(capacidade: 100_000);
+var store = new EventStore<Pedido>(capacity: 100_000);
 
 // Capacidade e partições
-var store = new EventStore<Pedido>(capacidade: 50_000, particoes: 8);
+var store = new EventStore<Pedido>(capacity: 50_000, partitions: 8);
 
 // Configuração avançada
 var store = new EventStore<Pedido>(new EventStoreOptions<Pedido>
 {
-    Capacidade = 100_000,
-    Particoes = 16,
+    Capacity = 100_000,
+    Partitions = 16,
     OnEventDiscarded = evt => Logger.LogTrace("Evento descartado: {Event}", evt),
     OnCapacityReached = () => Metrics.IncrementCounter("eventstore.capacidade_atingida"),
-    TimestampSelector = new PedidoTimestampSelector()
+    TimestampSelector = new PedidoTimestampSelector(),
+    // RFC 002: desative tracking quando não precisar de janelas
+    EnableWindowTracking = false
 });
 
 // API fluente
-var store = EventStore.For<Pedido>()
+var store = new EventStoreBuilder<Pedido>()
     .WithCapacity(100_000)
     .WithPartitions(8)
     .OnDiscarded(evt => Log(evt))
     .OnCapacityReached(() => NotificarAdmin())
     .WithTimestampSelector(new PedidoTimestampSelector())
+    // RFC 002
+    .WithEnableWindowTracking(false)
     .Create();
 ```
 
@@ -156,6 +232,8 @@ var filteredSum = store.Sum(
     to: fim
 );
 ```
+
+Nota: Consultas temporais (from/to) exigem `EnableWindowTracking = true`. Quando desativado, será lançada InvalidOperationException: "Window tracking is disabled. EnableWindowTracking must be true to use window queries."
 
 ## Snapshots com Filtros
 ```csharp
@@ -200,7 +278,8 @@ store.Statistics.LastAppendTime       // Timestamp da última adição
 API web completa para coleta e consulta de métricas em tempo real:
 
 ```bash
-cd .\samples\MetricsDashboarddotnet run
+cd .\samples\MetricsDashboard
+ dotnet run
 ```
 
 Endpoints disponíveis:
@@ -230,38 +309,10 @@ Projetado para alta concorrência e baixa latência. A ordem global entre parti�
 
 ---
 
-## Benchmarks de Performance
-
-### Tipos por Valor vs Tipos por Referência
-
-| Operação                  | Tipo Valor    | Tipo Referência | Melhoria   |
-|---------------------------|---------------|-----------------|------------|
-| Adição de Evento          | 560 ms        | 797 ms          | 42% mais rápido |
-| Iteração de Eventos       | 35.8 ns       | 132.5 ns        | 74% mais rápido |
-| Consultas de Eventos      | 393.5 ns      | 1,749.1 ns      | 77% mais rápido |
-
-### Structure of Arrays (SoA) vs Array of Structures (AoS)
-
-| Operação                  | SoA           | AoS             | Melhoria   |
-|---------------------------|---------------|-----------------|------------|
-| Agregação por Chave       | 55.2 ms       | 74.6 ms         | 26% mais rápido |
-| Uso de Memória            | Menor         | Maior           | Variável   |
-
-**Conclusões:**
-1. Tipos por valor são significativamente mais rápidos que tipos por referência para leitura e escrita.
-2. SoA melhora cache locality e reduz pressão de memória.
-3. Para alto throughput, a implementação `EventStoreV2` é recomendada.
-
-```csharp
-// Usando EventStoreV2 com tipos por valor
-var store = new EventStoreV2(capacidade: 1_000_000, particoes: 16);
-store.Add("sensor1", 25.5, DateTime.UtcNow.Ticks);
-double media = store.Average("sensor1");
-```
-
 ## Limitações
 - Ordem global apenas aproximada entre partições
 - Capacidade fixa; eventos antigos são descartados ao exceder
+- Sem persistência
 
 ## Licença
 MIT

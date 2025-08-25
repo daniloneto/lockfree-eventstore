@@ -1,5 +1,3 @@
-using System.Threading;
-
 namespace LockFree.EventStore;
 
 /// <summary>
@@ -9,7 +7,6 @@ public sealed class EventStoreStatistics
 {
     private long _totalAppended;
     private long _totalDiscarded;
-    private DateTime _lastAppendTime;
 
     /// <summary>
     /// Total number of events that have been appended since creation.
@@ -24,7 +21,7 @@ public sealed class EventStoreStatistics
     /// <summary>
     /// Timestamp of the last successful append operation.
     /// </summary>
-    public DateTime LastAppendTime => _lastAppendTime;
+    public DateTime LastAppendTime { get; private set; }
 
     /// <summary>
     /// Approximate events per second based on recent activity.
@@ -33,52 +30,51 @@ public sealed class EventStoreStatistics
     {
         get
         {
-            var elapsed = DateTime.UtcNow - _lastAppendTime;
-            if (elapsed.TotalSeconds < 1) return _totalAppended;
-            return Math.Max(0, _totalAppended / elapsed.TotalSeconds);
+            var elapsed = DateTime.UtcNow - LastAppendTime;
+            return elapsed.TotalSeconds < 1 ? _totalAppended : Math.Max(0, _totalAppended / elapsed.TotalSeconds);
         }
     }
 
     internal void RecordAppend()
     {
-        Interlocked.Increment(ref _totalAppended);
-        _lastAppendTime = DateTime.UtcNow;
+        _ = Interlocked.Increment(ref _totalAppended);
+        LastAppendTime = DateTime.UtcNow;
     }
 
     internal void RecordDiscard()
     {
-        Interlocked.Increment(ref _totalDiscarded);
+        _ = Interlocked.Increment(ref _totalDiscarded);
     }
-    
+
     /// <summary>
     /// Increments the total added counter by 1.
     /// </summary>
     internal void IncrementTotalAdded()
     {
-        Interlocked.Increment(ref _totalAppended);
-        _lastAppendTime = DateTime.UtcNow;
+        _ = Interlocked.Increment(ref _totalAppended);
+        LastAppendTime = DateTime.UtcNow;
     }
-    
+
     /// <summary>
     /// Increments the total added counter by the specified amount.
     /// </summary>
     internal void IncrementTotalAdded(int count)
     {
-        Interlocked.Add(ref _totalAppended, count);
-        _lastAppendTime = DateTime.UtcNow;
+        _ = Interlocked.Add(ref _totalAppended, count);
+        LastAppendTime = DateTime.UtcNow;
     }
-      /// <summary>
+    /// <summary>
     /// Increments the overwritten counter.
     /// </summary>
     internal void IncrementOverwritten()
     {
-        Interlocked.Increment(ref _totalDiscarded);
+        _ = Interlocked.Increment(ref _totalDiscarded);
     }
 
     internal void Reset()
     {
         Volatile.Write(ref _totalAppended, 0);
         Volatile.Write(ref _totalDiscarded, 0);
-        _lastAppendTime = default;
+        LastAppendTime = default;
     }
 }

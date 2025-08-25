@@ -54,7 +54,11 @@ public class SpecializedEventStoreTests
         store.Add(eventItem);
 
         // Act
-        var results = store.Query(keyId).ToList();
+        var results = new List<Event>();
+        store.QueryByKeyZeroAlloc(keyId, span =>
+        {
+            for (int i = 0; i < span.Length; i++) results.Add(span[i]);
+        });
 
         // Assert
         Assert.Single(results);

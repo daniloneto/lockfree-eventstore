@@ -264,7 +264,16 @@ public class ZeroAllocationTests
             });
 
         // Test traditional LINQ approach (for comparison)
-        var linqSum = store.Query().Sum(o => o.Amount);
+        // var linqSum = store.Query().Sum(o => o.Amount);
+        // Compute comparison sum via SnapshotViews to avoid LINQ and obsolete APIs
+        decimal linqSum = 0m;
+        foreach (var view in store.SnapshotViews())
+        {
+            foreach (var o in view)
+            {
+                linqSum += o.Amount;
+            }
+        }
 
         // Both should produce the same result
         Assert.Equal(linqSum, zeroAllocSum);

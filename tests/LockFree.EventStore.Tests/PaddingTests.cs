@@ -96,8 +96,8 @@ public class PaddingTests
         var snapshot = store.Snapshot();
         Assert.Equal(3, snapshot.Count);
         
-        // Test query
-        var results = store.Query().ToList();
+        // Test iteration via snapshot to replace Query()
+        var results = snapshot.ToList();
         Assert.Equal(3, results.Count);
         Assert.Contains("test1", results);
         Assert.Contains("test2", results);

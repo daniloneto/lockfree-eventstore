@@ -10,10 +10,13 @@ public interface IEventTimestampSelector<in TEvent>
     /// Returns the timestamp for <paramref name="e"/>.
     /// </summary>
     DateTime GetTimestamp(TEvent e);
-    
+
     /// <summary>
     /// Returns the timestamp ticks for <paramref name="e"/>.
     /// Default implementation calls GetTimestamp and gets Ticks.
     /// </summary>
-    long GetTimestampTicks(TEvent e) => GetTimestamp(e).Ticks;
+    long GetTimestampTicks(TEvent e)
+    {
+        return GetTimestamp(e).Ticks;
+    }
 }

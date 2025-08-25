@@ -1,7 +1,4 @@
 using System.Buffers;
-using System.Collections.Concurrent;
-using System.Numerics;
-using System.Threading;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -14,9 +11,8 @@ namespace LockFree.EventStore;
 public sealed class SpecializedEventStore
 {
     private readonly LockFreeEventRingBuffer[] _partitions;
-    private readonly EventStoreStatistics _statistics;
     private readonly KeyMap _keyMap; // Hot path optimization
-    
+
     // Window state per partition for incremental aggregation
     private readonly PartitionWindowState[] _windowStates;
 
@@ -39,20 +35,20 @@ public sealed class SpecializedEventStore
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
 
-        _statistics = new EventStoreStatistics();
+        Statistics = new EventStoreStatistics();
         _keyMap = new KeyMap();
         _partitions = new LockFreeEventRingBuffer[partitions];
-        
+
         var capacityPerPartition = Math.Max(1, capacity / partitions);
-        for (int i = 0; i < partitions; i++)
+        for (var i = 0; i < partitions; i++)
         {
             _partitions[i] = new LockFreeEventRingBuffer(
-                capacityPerPartition, 
+                capacityPerPartition,
                 onEventDiscarded != null ? OnEventDiscardedInternal : null);
         }
-        
+
         _windowStates = new PartitionWindowState[partitions];
-        for (int i = 0; i < _windowStates.Length; i++)
+        for (var i = 0; i < _windowStates.Length; i++)
         {
             _windowStates[i].Reset();
         }
@@ -66,7 +62,18 @@ public sealed class SpecializedEventStore
     /// <summary>
     /// Total configured capacity across all partitions.
     /// </summary>
-    public int Capacity => _partitions.Sum(p => p.Capacity);
+    public int Capacity
+    {
+        get
+        {
+            var total = 0;
+            for (var i = 0; i < _partitions.Length; i++)
+            {
+                total += _partitions[i].Capacity;
+            }
+            return total;
+        }
+    }
 
     /// <summary>
     /// Approximate total number of events across partitions.
@@ -75,9 +82,11 @@ public sealed class SpecializedEventStore
     {
         get
         {
-            long total = 0;
+            var total = 0L;
             foreach (var p in _partitions)
+            {
                 total += p.CountApprox;
+            }
             return total;
         }
     }
@@ -90,7 +99,7 @@ public sealed class SpecializedEventStore
     /// <summary>
     /// Gets the statistics for this event store.
     /// </summary>
-    public EventStoreStatistics Statistics => _statistics;
+    public EventStoreStatistics Statistics { get; }
 
     // --- String <-> KeyId bridge (uses _keyMap) ---
 
@@ -98,13 +107,19 @@ public sealed class SpecializedEventStore
     /// Resolves or creates a KeyId for the provided string key.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public KeyId GetOrCreateKeyId(string key) => _keyMap.GetOrAdd(key);
+    public KeyId GetOrCreateKeyId(string key)
+    {
+        return _keyMap.GetOrAdd(key);
+    }
 
     /// <summary>
     /// Attempts to resolve a KeyId for the provided string key without creating a new one.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryGetKeyId(string key, out KeyId id) => _keyMap.TryGet(key, out id);
+    public bool TryGetKeyId(string key, out KeyId id)
+    {
+        return _keyMap.TryGet(key, out id);
+    }
 
     /// <summary>
     /// Number of distinct keys registered in the key map.
@@ -114,7 +129,10 @@ public sealed class SpecializedEventStore
     /// <summary>
     /// Returns a snapshot of all string->KeyId mappings.
     /// </summary>
-    public IReadOnlyDictionary<string, KeyId> GetKeyMappings() => _keyMap.GetAllMappings();
+    public IReadOnlyDictionary<string, KeyId> GetKeyMappings()
+    {
+        return _keyMap.GetAllMappings();
+    }
 
     /// <summary>
     /// Adds a single event by string key, value and timestamp ticks.
@@ -140,11 +158,12 @@ public sealed class SpecializedEventStore
     /// Queries events by string key within an optional time range.
     /// If the key was never seen, returns an empty sequence.
     /// </summary>
+    [Obsolete("Use QueryByKeyZeroAlloc(key, processor, from, to) for zero-allocation streaming. See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
     public IEnumerable<Event> Query(string key, DateTime? from = null, DateTime? to = null)
     {
-        if (!_keyMap.TryGet(key, out var keyId))
-            return Array.Empty<Event>();
-        return Query(keyId, from, to);
+        return _keyMap.TryGet(key, out var keyId)
+            ? Query(keyId, from, to)
+            : [];
     }
 
     /// <summary>
@@ -166,8 +185,8 @@ public sealed class SpecializedEventStore
     public void Add(Event e)
     {
         var partition = GetPartition(e.Key);
-        _partitions[partition].TryEnqueue(e);
-        _statistics.RecordAppend();
+        _ = _partitions[partition].TryEnqueue(e);
+        Statistics.RecordAppend();
     }
 
     /// <summary>
@@ -186,22 +205,27 @@ public sealed class SpecializedEventStore
     public void Add(KeyId key, double value, DateTime timestamp)
     {
         Add(new Event(key, value, timestamp.Ticks));
-    }    /// <summary>
+    }
+
+    /// <summary>
     /// Adds multiple events efficiently using batch operations grouped by partition.
     /// Uses pooled buffers to avoid allocations in hot path.
     /// </summary>
     public void AddRange(ReadOnlySpan<Event> events)
     {
-        if (events.IsEmpty) return;
+        if (events.IsEmpty)
+        {
+            return;
+        }
 
         // Use pooled arrays for partition grouping to avoid allocations
         var partitionBuffers = new Event[_partitions.Length][];
         var partitionCounts = Buffers.RentInts(_partitions.Length);
-        
+
         try
         {
             // Initialize partition buffers and counts
-            for (int i = 0; i < _partitions.Length; i++)
+            for (var i = 0; i < _partitions.Length; i++)
             {
                 partitionBuffers[i] = Buffers.RentEvents(Math.Max(16, events.Length / _partitions.Length));
                 partitionCounts[i] = 0;
@@ -212,7 +236,7 @@ public sealed class SpecializedEventStore
             {
                 var partition = GetPartition(e.Key);
                 var count = partitionCounts[partition];
-                
+
                 // Expand buffer if needed
                 if (count >= partitionBuffers[partition].Length)
                 {
@@ -222,35 +246,39 @@ public sealed class SpecializedEventStore
                     Buffers.ReturnEvents(oldBuffer);
                     partitionBuffers[partition] = newBuffer;
                 }
-                
+
                 partitionBuffers[partition][count] = e;
                 partitionCounts[partition] = count + 1;
             }
 
             // Add to each partition in batch for optimal cache usage
-            for (int i = 0; i < _partitions.Length; i++)
+            for (var i = 0; i < _partitions.Length; i++)
             {
                 var count = partitionCounts[i];
                 if (count > 0)
                 {
                     var span = partitionBuffers[i].AsSpan(0, count);
-                    _partitions[i].TryEnqueueBatch(span);
+                    _ = _partitions[i].TryEnqueueBatch(span);
                 }
             }
 
-            _statistics.IncrementTotalAdded(events.Length);
+            Statistics.IncrementTotalAdded(events.Length);
         }
         finally
         {
             // Return all buffers to pools
             Buffers.ReturnInts(partitionCounts);
-            for (int i = 0; i < _partitions.Length; i++)
+            for (var i = 0; i < _partitions.Length; i++)
             {
                 if (partitionBuffers[i] != null)
+                {
                     Buffers.ReturnEvents(partitionBuffers[i]);
+                }
             }
         }
-    }    /// <summary>
+    }
+
+    /// <summary>
     /// Adds multiple events from an enumerable.
     /// Uses chunked processing to avoid large allocations.
     /// </summary>
@@ -267,7 +295,7 @@ public sealed class SpecializedEventStore
         else
         {
             // Process in chunks to avoid large temporary allocations
-            Buffers.WithRentedBuffer<Event>(Buffers.DefaultChunkSize, buffer =>
+            Buffers.WithRentedBuffer(Buffers.DefaultChunkSize, buffer =>
             {
                 using var enumerator = events.GetEnumerator();
                 while (enumerator.MoveNext())
@@ -278,7 +306,7 @@ public sealed class SpecializedEventStore
                         buffer[count++] = enumerator.Current;
                     }
                     while (count < buffer.Length && enumerator.MoveNext());
-                    
+
                     // Process the chunk
                     AddRange(buffer.AsSpan(0, count));
                 }
@@ -302,36 +330,29 @@ public sealed class SpecializedEventStore
     /// <summary>
     /// Queries events by key within a time range.
     /// </summary>
+    [Obsolete("Use QueryByKeyZeroAlloc(key, processor, from, to) for zero-allocation streaming. See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
     public IEnumerable<Event> Query(KeyId key, DateTime? from = null, DateTime? to = null)
     {
         var partition = GetPartition(key);
         var partitionBuffer = _partitions[partition];
 
-        if (from.HasValue && to.HasValue)
-        {
-            return partitionBuffer.EnumerateSnapshot(key, from.Value.Ticks, to.Value.Ticks);
-        }
-        else if (from.HasValue)
-        {
-            return partitionBuffer.EnumerateSnapshot(e => e.Key.Equals(key) && e.TimestampTicks >= from.Value.Ticks);
-        }
-        else if (to.HasValue)
-        {
-            return partitionBuffer.EnumerateSnapshot(e => e.Key.Equals(key) && e.TimestampTicks <= to.Value.Ticks);
-        }
-        else
-        {
-            return partitionBuffer.EnumerateSnapshot(key);
-        }
+        return from.HasValue && to.HasValue
+            ? partitionBuffer.EnumerateSnapshot(key, from.Value.Ticks, to.Value.Ticks)
+            : from.HasValue
+            ? partitionBuffer.EnumerateSnapshot(e => e.Key.Equals(key) && e.TimestampTicks >= from.Value.Ticks)
+            : to.HasValue
+                ? partitionBuffer.EnumerateSnapshot(e => e.Key.Equals(key) && e.TimestampTicks <= to.Value.Ticks)
+                : partitionBuffer.EnumerateSnapshot(key);
     }
 
     /// <summary>
     /// Queries events across all partitions within a time range.
     /// </summary>
+    [Obsolete("Use QueryZeroAlloc(processor, from, to) for zero-allocation streaming. See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
     public IEnumerable<Event> Query(DateTime? from = null, DateTime? to = null)
     {
         var results = new List<Event>();
-        
+
         if (from.HasValue && to.HasValue)
         {
             var fromTicks = from.Value.Ticks;
@@ -364,7 +385,7 @@ public sealed class SpecializedEventStore
                 results.AddRange(partition.EnumerateSnapshot());
             }
         }
-        
+
         return results;
     }
 
@@ -373,7 +394,7 @@ public sealed class SpecializedEventStore
     /// </summary>
     public long Purge(DateTime olderThan)
     {
-        long totalPurged = 0;
+        var totalPurged = 0L;
         var thresholdTicks = olderThan.Ticks;
 
         foreach (var partition in _partitions)
@@ -389,10 +410,10 @@ public sealed class SpecializedEventStore
     /// </summary>
     public IEnumerable<(int PartitionIndex, long Head, long Tail, int Epoch, long Count)> GetPartitionStatistics()
     {
-        for (int i = 0; i < _partitions.Length; i++)
+        for (var i = 0; i < _partitions.Length; i++)
         {
-            var stats = _partitions[i].GetStatistics();
-            yield return (i, stats.Head, stats.Tail, stats.Epoch, stats.Count);
+            var (head, tail, epoch, count) = _partitions[i].GetStatistics();
+            yield return (i, head, tail, epoch, count);
         }
     }
 
@@ -404,7 +425,7 @@ public sealed class SpecializedEventStore
 
     private void OnEventDiscardedInternal(Event discardedEvent)
     {
-        _statistics.RecordDiscard();
+        Statistics.RecordDiscard();
         // Additional logic for discarded events can be added here
     }
 
@@ -414,22 +435,15 @@ public sealed class SpecializedEventStore
     public Dictionary<KeyId, double> AggregateByKey()
     {
         var results = new Dictionary<KeyId, double>();
-        
+
         foreach (var partition in _partitions)
         {
             foreach (var e in partition.EnumerateSnapshot())
             {
-                if (results.TryGetValue(e.Key, out var existingValue))
-                {
-                    results[e.Key] = existingValue + e.Value;
-                }
-                else
-                {
-                    results[e.Key] = e.Value;
-                }
+                results[e.Key] = results.TryGetValue(e.Key, out var existingValue) ? existingValue + e.Value : e.Value;
             }
         }
-        
+
         return results;
     }
 
@@ -441,22 +455,15 @@ public sealed class SpecializedEventStore
         var results = new Dictionary<KeyId, double>();
         var fromTicks = from.Ticks;
         var toTicks = to.Ticks;
-        
+
         foreach (var partition in _partitions)
         {
             foreach (var e in partition.EnumerateSnapshot(fromTicks, toTicks))
             {
-                if (results.TryGetValue(e.Key, out var existingValue))
-                {
-                    results[e.Key] = existingValue + e.Value;
-                }
-                else
-                {
-                    results[e.Key] = e.Value;
-                }
+                results[e.Key] = results.TryGetValue(e.Key, out var existingValue) ? existingValue + e.Value : e.Value;
             }
         }
-        
+
         return results;
     }
 
@@ -466,7 +473,7 @@ public sealed class SpecializedEventStore
     public Dictionary<KeyId, (double Value, DateTime Timestamp)> GetLatestValues()
     {
         var results = new Dictionary<KeyId, (double Value, DateTime Timestamp)>();
-        
+
         foreach (var partition in _partitions)
         {
             foreach (var e in partition.EnumerateSnapshot())
@@ -478,7 +485,7 @@ public sealed class SpecializedEventStore
                 }
             }
         }
-        
+
         return results;
     }
 
@@ -488,7 +495,7 @@ public sealed class SpecializedEventStore
     /// </summary>
     public void SnapshotZeroAlloc(Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
     {
-        Buffers.WithRentedBuffer<Event>(chunkSize, buffer =>
+        Buffers.WithRentedBuffer(chunkSize, buffer =>
         {
             foreach (var partition in _partitions)
             {
@@ -499,14 +506,14 @@ public sealed class SpecializedEventStore
                     foreach (var evt in partition.EnumerateSnapshot())
                     {
                         partitionBuffer[count++] = evt;
-                        
+
                         if (count >= chunkSize)
                         {
                             processor(partitionBuffer.AsSpan(0, count));
                             count = 0;
                         }
                     }
-                    
+
                     // Process remaining events
                     if (count > 0)
                     {
@@ -546,7 +553,8 @@ public sealed class SpecializedEventStore
         }
         else if (from.HasValue)
         {
-            partitionBuffer.SnapshotFilteredZeroAlloc(e => e.Key.Equals(key) && e.TimestampTicks >= from.Value.Ticks, processor, chunkSize);
+            var fromTicks = from.Value.Ticks;
+            partitionBuffer.SnapshotFilteredZeroAlloc(e => e.Key.Equals(key) && e.TimestampTicks >= fromTicks, processor, chunkSize);
         }
         else if (to.HasValue)
         {
@@ -618,26 +626,22 @@ public sealed class SpecializedEventStore
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void AccumulateResults(Dictionary<KeyId, double> results, ReadOnlySpan<Event> events)
     {
-        for (int i = 0; i < events.Length; i++)
+        for (var i = 0; i < events.Length; i++)
         {
             var e = events[i];
-            if (results.TryGetValue(e.Key, out var existing))
-            {
-                results[e.Key] = existing + e.Value;
-            }
-            else
-            {
-                results[e.Key] = e.Value;
-            }
+            results[e.Key] = results.TryGetValue(e.Key, out var existing) ? existing + e.Value : e.Value;
         }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void EmitResultsChunks(Dictionary<KeyId, double> results, Action<ReadOnlySpan<KeyValuePair<KeyId, double>>> processor, int chunkSize)
     {
-        if (results.Count == 0) return;
+        if (results.Count == 0)
+        {
+            return;
+        }
 
-        Buffers.WithRentedBuffer<KeyValuePair<KeyId, double>>(chunkSize, buffer =>
+        Buffers.WithRentedBuffer(chunkSize, buffer =>
         {
             var count = 0;
             foreach (var kvp in results)
@@ -664,7 +668,7 @@ public sealed class SpecializedEventStore
         var results = new Dictionary<KeyId, double>();
         var fromTicks = from.Ticks;
         var toTicks = to.Ticks;
-        
+
         foreach (var partition in _partitions)
         {
             partition.SnapshotTimeRangeZeroAlloc(fromTicks, toTicks, events => AccumulateResults(results, events), chunkSize);
