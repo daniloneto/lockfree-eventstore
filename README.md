@@ -171,16 +171,16 @@ var total = store.Aggregate(() => 0m, (acc, e) => acc + e.Valor,
 ## Novos Construtores
 ```csharp
 // Capacidade explícita
-var store = new EventStore<Pedido>(capacidade: 100_000);
+var store = new EventStore<Pedido>(capacity: 100_000);
 
 // Capacidade e partições
-var store = new EventStore<Pedido>(capacidade: 50_000, particoes: 8);
+var store = new EventStore<Pedido>(capacity: 50_000, partitions: 8);
 
 // Configuração avançada
 var store = new EventStore<Pedido>(new EventStoreOptions<Pedido>
 {
-    Capacidade = 100_000,
-    Particoes = 16,
+    Capacity = 100_000,
+    Partitions = 16,
     OnEventDiscarded = evt => Logger.LogTrace("Evento descartado: {Event}", evt),
     OnCapacityReached = () => Metrics.IncrementCounter("eventstore.capacidade_atingida"),
     TimestampSelector = new PedidoTimestampSelector(),
@@ -189,7 +189,7 @@ var store = new EventStore<Pedido>(new EventStoreOptions<Pedido>
 });
 
 // API fluente
-var store = EventStore.For<Pedido>()
+var store = new EventStoreBuilder<Pedido>()
     .WithCapacity(100_000)
     .WithPartitions(8)
     .OnDiscarded(evt => Log(evt))
@@ -278,7 +278,8 @@ store.Statistics.LastAppendTime       // Timestamp da última adição
 API web completa para coleta e consulta de métricas em tempo real:
 
 ```bash
-cd .\samples\MetricsDashboarddotnet run
+cd .\samples\MetricsDashboard
+ dotnet run
 ```
 
 Endpoints disponíveis:

@@ -60,7 +60,7 @@ internal static class Program
             {
                 var start = Stopwatch.GetTimestamp();
                 var agg = new Dictionary<string, (int Count, long Sum)>();
-                agg = orderStore.ProcessEvents(agg, (ref Dictionary<string, (int Count, long Sum)> state, OrderEvent e, DateTime? _) =>
+                agg = orderStore.ProcessEvents(agg, (ref state, e, _) =>
                 {
                     // Guard clause to reduce nesting
                     if (e.Stream != stream)
@@ -86,7 +86,7 @@ internal static class Program
 
             // from ignored; return raw list
             var list = new List<GatewayOrderCreated>();
-            list = orderStore.ProcessEvents(list, (ref List<GatewayOrderCreated> acc, OrderEvent e, DateTime? ts) =>
+            list = orderStore.ProcessEvents(list, (ref acc, e, ts) =>
             {
                 // Guard clause to reduce nesting
                 if (e.Stream != stream)
@@ -138,7 +138,7 @@ internal static class Program
     private static IResult GetMetricsSum(EventStore<MetricEvent> store, DateTime? from, DateTime? to, string label)
     {
         // Prefer zero-alloc ProcessEvents to compute sum
-        var sum = store.ProcessEvents(0.0, (ref double s, MetricEvent e, DateTime? _) =>
+        var sum = store.ProcessEvents(0.0, (ref s, e, _) =>
         {
             if (e.Label == label)
             {
@@ -153,7 +153,7 @@ internal static class Program
     {
         var from = DateTime.UtcNow.AddMinutes(-minutes);
         var to = DateTime.UtcNow;
-        var sum = store.ProcessEvents(0.0, (ref double s, MetricEvent e, DateTime? _) =>
+        var sum = store.ProcessEvents(0.0, (ref s, e, _) =>
         {
             if (e.Label == label)
             {
@@ -209,7 +209,7 @@ internal static class Program
         var result = (Sum: 0.0, Min: double.MaxValue, Max: double.MinValue, Count: 0);
         result = store.ProcessEvents(
             result,
-            (ref (double Sum, double Min, double Max, int Count) state, MetricEvent evt, DateTime? timestamp) =>
+            (ref state, evt, timestamp) =>
             {
                 var eventTicks = timestamp?.Ticks ?? evt.Timestamp.Ticks;
                 if (eventTicks >= fromTicks && eventTicks <= toTicks)
@@ -246,7 +246,7 @@ internal static class Program
         var result = (Processed: 0, HighCpuCount: 0);
         result = store.ProcessEvents(
             result,
-            (ref (int Processed, int HighCpuCount) state, MetricEvent evt, DateTime? timestamp) =>
+            (ref state, evt, timestamp) =>
             {
                 state.Processed++;
                 if ((label == null || evt.Label.Contains(label)) && evt.Value > 50)

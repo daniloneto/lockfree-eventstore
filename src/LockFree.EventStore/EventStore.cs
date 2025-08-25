@@ -361,6 +361,7 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EnsureBucketsInitialized(int partitionIndex, ref PartitionWindowState state, long currentTimestamp)
     {
+        _ = partitionIndex; // suppress unused warning (kept for future extensibility)
         if (!_options.WindowSizeTicks.HasValue)
         {
             return;
@@ -377,14 +378,15 @@ public sealed class EventStore<TEvent>
 
             // Align window start and buckets to current time
             var windowStartTicks = currentTimestamp - windowSize;
-            var firstBucketStart = windowStartTicks - ((windowStartTicks % bucketWidth + bucketWidth) % bucketWidth);
+            var remainder = ((windowStartTicks % bucketWidth) + bucketWidth) % bucketWidth;
+            var firstBucketStart = windowStartTicks - remainder;
             state.WindowStartTicks = windowStartTicks;
             state.WindowEndTicks = currentTimestamp;
 
             state.BucketHead = 0;
             for (var i = 0; i < bucketCount; i++)
             {
-                var start = firstBucketStart + (long)i * bucketWidth;
+                var start = firstBucketStart + (i * bucketWidth);
                 state.Buckets[i].Reset(start);
             }
 
@@ -402,6 +404,31 @@ public sealed class EventStore<TEvent>
         return r < 0 ? r + m : r;
     }
 
+    // New helper for tick alignment
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long AlignDown(long ticks, long width)
+    {
+        var rem = ((ticks % width) + width) % width;
+        return ticks - rem;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool TryPrepareWindowAdvance(long currentTimestamp, ref PartitionWindowState state, out long newWindowStart)
+    {
+        newWindowStart = 0;
+        if (TimestampSelector == null || !_options.WindowSizeTicks.HasValue)
+        {
+            return false;
+        }
+
+        EnsureBucketsInitialized(0, ref state, currentTimestamp); // partitionIndex is unused inside EnsureBucketsInitialized for initialization path
+
+        var windowSizeTicks = _options.WindowSizeTicks!.Value;
+        newWindowStart = currentTimestamp - windowSizeTicks;
+
+        return !IsNoopWindowAdvance(in state, newWindowStart, currentTimestamp);
+    }
+
     /// <summary>
     /// Advances the window for a partition based on current timestamp and fixed window size.
     /// Rolls the bucket ring forward and evicts buckets that have left the window.
@@ -409,49 +436,58 @@ public sealed class EventStore<TEvent>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void AdvancePartitionWindow(int partitionIndex, ref PartitionWindowState state, long currentTimestamp)
     {
-        if (TimestampSelector == null || !_options.WindowSizeTicks.HasValue)
+        _ = partitionIndex; // suppress unused warning (kept for future extensibility)
+        if (!TryPrepareWindowAdvance(currentTimestamp, ref state, out var newWindowStart))
         {
             return;
         }
 
-        EnsureBucketsInitialized(partitionIndex, ref state, currentTimestamp);
+        var prevStart = state.WindowStartTicks;
+        var prevEnd = state.WindowEndTicks;
 
-        var windowSizeTicks = _options.WindowSizeTicks!.Value;
-        var newWindowStart = currentTimestamp - windowSizeTicks;
-
-        if (IsNoopWindowAdvance(in state, newWindowStart, currentTimestamp))
+        // If the candidate window start moved backwards or did not progress, don't roll buckets.
+        if (newWindowStart <= prevStart)
         {
-            return;
-        }
-
-        var deltaTicks = newWindowStart - state.WindowStartTicks;
-
-        state.WindowStartTicks = newWindowStart;
-        state.WindowEndTicks = currentTimestamp;
-
-        if (deltaTicks <= 0)
-        {
-            return;
-        }
-
-        var advanceBuckets = (int)(deltaTicks / state.BucketWidthTicks);
-        if (advanceBuckets == 0)
-        {
-            IncrementWindowAdvanceCount();
+            // Extend end only if timestamp moved forward
+            if (currentTimestamp > prevEnd)
+            {
+                state.WindowEndTicks = currentTimestamp;
+                IncrementWindowAdvanceCount();
+            }
             return;
         }
 
         var buckets = state.Buckets!;
         var bucketCount = buckets.Length;
+        var width = state.BucketWidthTicks;
 
-        if (advanceBuckets >= bucketCount)
+        // Compute advances based on bucket boundary crossings, not raw ticks
+        var prevAlignedStart = buckets[state.BucketHead].StartTicks; // invariant: head contains WindowStart (floor-aligned)
+        var newAlignedStart = AlignDown(newWindowStart, width);
+        var diffTicks = newAlignedStart - prevAlignedStart;
+        if (diffTicks <= 0)
         {
-            ResetAllBucketsForNewWindow(ref state, newWindowStart);
+            // No boundary crossed; just advance end and start
+            state.WindowStartTicks = newWindowStart;
+            state.WindowEndTicks = currentTimestamp > prevEnd ? currentTimestamp : prevEnd;
             IncrementWindowAdvanceCount();
             return;
         }
 
-        EvictAndRollBuckets(ref state, advanceBuckets, newWindowStart);
+        var advanceBuckets = (int)(diffTicks / width);
+        if (advanceBuckets >= bucketCount)
+        {
+            ResetAllBucketsForNewWindow(ref state, newAlignedStart);
+            state.WindowStartTicks = newWindowStart;
+            state.WindowEndTicks = currentTimestamp > prevEnd ? currentTimestamp : prevEnd;
+            IncrementWindowAdvanceCount();
+            return;
+        }
+
+        // Roll ring and reset new tail buckets aligned to newAlignedStart
+        EvictAndRollBuckets(ref state, advanceBuckets, newAlignedStart);
+        state.WindowStartTicks = newWindowStart;
+        state.WindowEndTicks = currentTimestamp > prevEnd ? currentTimestamp : prevEnd;
         RecomputeMinMaxAcrossBuckets(ref state);
 
         IncrementWindowAdvanceCount();
@@ -470,11 +506,14 @@ public sealed class EventStore<TEvent>
         var bucketCount = buckets.Length;
         var bucketWidth = state.BucketWidthTicks;
 
+        // Re-seed buckets aligned to the floor of newWindowStart and realign BucketHead
+        var firstAlignedStart = AlignDown(newWindowStart, bucketWidth);
         for (var i = 0; i < bucketCount; i++)
         {
-            var start = newWindowStart - ((bucketCount - i) * bucketWidth);
+            var start = firstAlignedStart + (i * bucketWidth);
             buckets[i].Reset(start);
         }
+        // BucketHead points to the bucket that contains WindowStartTicks (floor-aligned)
         state.BucketHead = 0;
         state.Count = 0;
         state.Sum = 0.0;
@@ -483,7 +522,7 @@ public sealed class EventStore<TEvent>
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void EvictAndRollBuckets(ref PartitionWindowState state, int advanceBuckets, long newWindowStart)
+    private static void EvictAndRollBuckets(ref PartitionWindowState state, int advanceBuckets, long newAlignedStart)
     {
         var buckets = state.Buckets!;
         var bucketCount = buckets.Length;
@@ -503,8 +542,8 @@ public sealed class EventStore<TEvent>
             // Move head forward
             state.BucketHead = (state.BucketHead + 1) % bucketCount;
 
-            // Compute new bucket's start at the tail position
-            var newTailStart = newWindowStart + ((bucketCount - 1 - step) * bucketWidth);
+            // Compute new bucket's start at the tail position (aligned to new window start)
+            var newTailStart = newAlignedStart + ((bucketCount - 1 - step) * bucketWidth);
             ref var toReset = ref buckets[Mod(state.BucketHead + (bucketCount - 1), bucketCount)];
             toReset.Reset(newTailStart);
         }
@@ -556,6 +595,10 @@ public sealed class EventStore<TEvent>
         var bucketWidth = state.BucketWidthTicks;
         var offsetTicks = eventTicks - windowStart;
         var bucketOffset = (int)(offsetTicks / bucketWidth);
+        if (bucketOffset >= buckets.Length)
+        {
+            bucketOffset = buckets.Length - 1; // clamp inclusive end to last bucket
+        }
         var index = (state.BucketHead + bucketOffset) % buckets.Length;
 
         // Update bucket
@@ -1085,7 +1128,7 @@ public sealed class EventStore<TEvent>
         {
             // Return empty array (shared) to avoid allocation
             IncrementSnapshotBytesExposed(0);
-            return Array.Empty<TEvent>();
+            return [];
         }
 
         // Allocate final result array once with exact size based on captured views
@@ -1243,7 +1286,7 @@ public sealed class EventStore<TEvent>
         }
 
         var init = (Count: 0L, Sum: 0.0, Min: 0.0, Max: 0.0, Has: false);
-        var state = ZeroAllocationExtensions.ProcessEventsChunked<TEvent, (long Count, double Sum, double Min, double Max, bool Has)>(
+        var state = ZeroAllocationExtensions.ProcessEventsChunked(
             this,
             init,
             (s, chunk) => AccumulateChunk(s, chunk, selector),
@@ -1322,7 +1365,7 @@ public sealed class EventStore<TEvent>
             if (CanUseBucketFastPath(from.Value, to.Value))
             {
                 var r = AggregateFromBuckets(from.Value, to.Value);
-                return r.Count > 0 ? r.Max : (double?)null;
+                return r.Count > 0 ? r.Max : null;
             }
         }
         return ZeroAllocationExtensions.MaxZeroAlloc(this, selector, filter, from, to);
@@ -1680,195 +1723,6 @@ public sealed class EventStore<TEvent>
                     processor(chunk);
                 }
             }
-        }
-    }
-
-    /// <summary>
-    /// Performs window aggregation for a single partition within the specified time range and optional filter.
-    /// </summary>
-    /// <param name="index">Partition index.</param>
-    /// <param name="fromTicks">Inclusive start of the time window (ticks).</param>
-    /// <param name="toTicks">Inclusive end of the time window (ticks).</param>
-    /// <param name="filter">Optional predicate to filter events.</param>
-    /// <returns>Aggregation state computed for the partition.</returns>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private WindowAggregateState AggregateWindowForPartition(int index, long fromTicks, long toTicks, Predicate<TEvent>? filter)
-    {
-        var state = new WindowAggregateState();
-
-        var tsSel = TimestampSelector;
-        if (tsSel == null)
-        {
-            return state;
-        }
-
-        foreach (var item in EnumeratePartitionSnapshot(index))
-        {
-            var itemTicks = tsSel.GetTimestamp(item).Ticks;
-            if (itemTicks < fromTicks || itemTicks > toTicks)
-            {
-                continue;
-            }
-
-            if (filter?.Invoke(item) == false)
-            {
-                continue;
-            }
-
-            state.Count++;
-
-            if (TryExtractNumericValue(item, out var value))
-            {
-                UpdateAggregateState(ref state, value);
-            }
-        }
-        return state;
-    }
-
-    /// <summary>
-    /// Computes the sum for a single partition over the specified window and optional filter using the provided selector.
-    /// </summary>
-    /// <typeparam name="TResult">Numeric type of the sum result.</typeparam>
-    /// <param name="index">Partition index.</param>
-    /// <param name="selector">Selector that projects a numeric value from an event.</param>
-    /// <param name="fromTicks">Inclusive start tick of the window.</param>
-    /// <param name="toTicks">Inclusive end tick of the window.</param>
-    /// <param name="filter">Optional predicate to filter events.</param>
-    /// <returns>The sum for the partition.</returns>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private TResult SumWindowForPartition<TResult>(int index, Func<TEvent, TResult> selector, long fromTicks, long toTicks, Predicate<TEvent>? filter)
-        where TResult : struct, INumber<TResult>
-    {
-        var sum = TResult.Zero;
-        var tsSel = TimestampSelector;
-        if (tsSel == null)
-        {
-            return sum;
-        }
-
-        foreach (var item in EnumeratePartitionSnapshot(index))
-        {
-            var itemTicks = tsSel.GetTimestamp(item).Ticks;
-            if (itemTicks < fromTicks || itemTicks > toTicks)
-            {
-                continue;
-            }
-
-            if (filter?.Invoke(item) == false)
-            {
-                continue;
-            }
-
-            sum += selector(item);
-        }
-        return sum;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void UpdateAggregateState(ref WindowAggregateState state, double value)
-    {
-        state.Sum += value;
-        if (state.Count == 1)
-        {
-            state.Min = value;
-            state.Max = value;
-        }
-        else
-        {
-            if (value < state.Min)
-            {
-                state.Min = value;
-            }
-            if (value > state.Max)
-            {
-                state.Max = value;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Attempts to extract a numeric value from an event using reflection as a fallback.
-    /// This is used for generic window aggregation when no explicit selector is provided.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    [System.Diagnostics.CodeAnalysis.RequiresUnreferencedCode("Uses reflection to inspect properties of TEvent for numeric extraction. Avoid in AOT/trimming; kept only for legacy APIs.")]
-    [System.Diagnostics.CodeAnalysis.RequiresDynamicCode("Uses reflection to inspect properties of TEvent.")]
-    private static bool TryExtractNumericValue(TEvent item, out double value)
-    {
-        value = 0.0;
-        if (System.Collections.Generic.EqualityComparer<TEvent>.Default.Equals(item, default))
-        {
-            return false;
-        }
-
-        var type = typeof(TEvent);
-
-        // Fast-path for known types
-        if (TryGetKnownTypeValue(item, type, out value))
-        {
-            return true;
-        }
-
-        // Generic fallback: first numeric property
-        foreach (var prop in type.GetProperties())
-        {
-            if (!prop.CanRead)
-            {
-                continue;
-            }
-            var v = prop.GetValue(item);
-            if (TryCoerceToDouble(v, out value))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    [System.Diagnostics.CodeAnalysis.RequiresUnreferencedCode("Uses reflection to access known property names. Avoid in AOT/trimming; kept only for legacy APIs.")]
-    [System.Diagnostics.CodeAnalysis.RequiresDynamicCode("Uses reflection to access known property names.")]
-    private static bool TryGetKnownTypeValue(TEvent item, Type type, out double value)
-    {
-        // Common fast-paths for known sample types
-        if (type.Name == "Order")
-        {
-            var amountProperty = type.GetProperty("Amount");
-            if (amountProperty != null)
-            {
-                return TryCoerceToDouble(amountProperty.GetValue(item), out value);
-            }
-        }
-        if (type.Name == "MetricEvent")
-        {
-            var valueProperty = type.GetProperty("Value");
-            if (valueProperty != null)
-            {
-                return TryCoerceToDouble(valueProperty.GetValue(item), out value);
-            }
-        }
-        value = 0.0;
-        return false;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool TryCoerceToDouble(object? val, out double value)
-    {
-        switch (val)
-        {
-            case double dv: value = dv; return true;
-            case float ff: value = ff; return true;
-            case decimal dd: value = (double)dd; return true;
-            case int i: value = i; return true;
-            case long l: value = l; return true;
-            case uint ui: value = ui; return true;
-            case ulong ul: value = ul; return true;
-            case short s: value = s; return true;
-            case ushort us: value = us; return true;
-            case byte b: value = b; return true;
-            case sbyte sb: value = sb; return true;
-            default: value = 0.0; return false;
         }
     }
 

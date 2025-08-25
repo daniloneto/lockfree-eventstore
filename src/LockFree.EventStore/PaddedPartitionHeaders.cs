@@ -9,7 +9,6 @@ namespace LockFree.EventStore;
 internal sealed class PaddedPartitionHeaders
 {
     private readonly PartitionHeader[] _headers;
-    private readonly int _partitionCount;
 
     /// <summary>
     /// Cache line size in bytes (typically 64 bytes on modern CPUs)
@@ -23,7 +22,7 @@ internal sealed class PaddedPartitionHeaders
     /// <param name="capacityPerPartition">Capacity for each partition</param>
     public PaddedPartitionHeaders(int partitionCount, int capacityPerPartition)
     {
-        _partitionCount = partitionCount;
+        Count = partitionCount;
 
         // Allocate array with extra space for alignment
         // We need to ensure each PartitionHeader starts at a cache line boundary
@@ -68,7 +67,7 @@ internal sealed class PaddedPartitionHeaders
     /// </summary>
     public ref PartitionHeader GetHeader(int partitionIndex)
     {
-        if (partitionIndex < 0 || partitionIndex >= _partitionCount)
+        if (partitionIndex < 0 || partitionIndex >= Count)
         {
             throw new ArgumentOutOfRangeException(nameof(partitionIndex));
         }
@@ -80,7 +79,7 @@ internal sealed class PaddedPartitionHeaders
     /// <summary>
     /// Gets the number of partitions.
     /// </summary>
-    public int Count => _partitionCount;
+    public int Count { get; }
 
     /// <summary>
     /// Provides enumeration over all partition headers.
@@ -110,6 +109,6 @@ internal sealed class PaddedPartitionHeaders
             return _currentIndex < _headers.Count;
         }
 
-        public readonly ref PartitionHeader Current => ref _headers.GetHeader(_currentIndex);
+        public ref readonly PartitionHeader Current => ref _headers.GetHeader(_currentIndex);
     }
 }

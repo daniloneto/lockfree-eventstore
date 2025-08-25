@@ -36,8 +36,6 @@ public sealed class OptimizedPartition
     private long _head;
     private long _tail;
     private int _epoch;
-    private readonly int _capacity;
-    private readonly StorageLayout _layout;
     private readonly Action<Event>? _onItemDiscarded;
     
     /// <summary>
@@ -48,8 +46,8 @@ public sealed class OptimizedPartition
         // CA1512: prefer guard method
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
         
-        _capacity = capacity;
-        _layout = layout;
+        Capacity = capacity;
+        Layout = layout;
         _onItemDiscarded = onItemDiscarded;
         
         if (layout == StorageLayout.AoS)
@@ -67,21 +65,21 @@ public sealed class OptimizedPartition
         _tail = 0;
         _epoch = 0;
     }
-    
+
     /// <summary>
     /// Gets the current storage layout.
     /// </summary>
-    public StorageLayout Layout => _layout;
-    
+    public StorageLayout Layout { get; }
+
     /// <summary>
     /// Total capacity.
     /// </summary>
-    public int Capacity => _capacity;
-    
+    public int Capacity { get; }
+
     /// <summary>
     /// Approximate count of items currently in the buffer.
     /// </summary>
-    public long CountApprox => Math.Max(0, Math.Min(_capacity, Volatile.Read(ref _tail) - Volatile.Read(ref _head)));
+    public long CountApprox => Math.Max(0, Math.Min(Capacity, Volatile.Read(ref _tail) - Volatile.Read(ref _head)));
     
     /// <summary>
     /// Whether the buffer is empty (approximate).
@@ -91,7 +89,7 @@ public sealed class OptimizedPartition
     /// <summary>
     /// Whether the buffer is at full capacity (approximate).
     /// </summary>
-    public bool IsFull => CountApprox >= _capacity;
+    public bool IsFull => CountApprox >= Capacity;
     
     /// <summary>
     /// Enqueues a single event.
@@ -99,9 +97,9 @@ public sealed class OptimizedPartition
     public bool TryEnqueue(Event item)
     {
         var tail = Interlocked.Increment(ref _tail);
-        var index = (int)((tail - 1) % _capacity);
+        var index = (int)((tail - 1) % Capacity);
         
-        if (_layout == StorageLayout.AoS)
+        if (Layout == StorageLayout.AoS)
         {
             _events![index] = item;
         }
@@ -117,7 +115,7 @@ public sealed class OptimizedPartition
         // Update epoch sparingly
         if ((tail & 0xFF) == 0)
         {
-            Interlocked.Increment(ref _epoch);
+            _ = Interlocked.Increment(ref _epoch);
         }
         
         return true;
@@ -128,18 +126,21 @@ public sealed class OptimizedPartition
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int TryEnqueueBatch(ReadOnlySpan<Event> batch)
     {
-        if (batch.IsEmpty) return 0;
-        
+        if (batch.IsEmpty)
+        {
+            return 0;
+        }
+
         // Reserve space for the entire batch atomically
         var startTail = Interlocked.Add(ref _tail, batch.Length);
         
         // Write all items to their reserved positions
-        if (_layout == StorageLayout.AoS)
+        if (Layout == StorageLayout.AoS)
         {
             for (int i = 0; i < batch.Length; i++)
             {
                 var position = startTail - batch.Length + i;
-                _events![position % _capacity] = batch[i];
+                _events![position % Capacity] = batch[i];
             }
         }
         else
@@ -147,7 +148,7 @@ public sealed class OptimizedPartition
             for (int i = 0; i < batch.Length; i++)
             {
                 var position = startTail - batch.Length + i;
-                var index = (int)(position % _capacity);
+                var index = (int)(position % Capacity);
                 
                 _keys![index] = batch[i].Key;
                 _values![index] = batch[i].Value;
@@ -157,9 +158,9 @@ public sealed class OptimizedPartition
         
         // Advance head if needed (may overwrite oldest entries)
         AdvanceHeadIfNeeded(startTail);
-        
+
         // Update epoch once for the entire batch
-        Interlocked.Increment(ref _epoch);
+        _ = Interlocked.Increment(ref _epoch);
         
         return batch.Length;
     }
@@ -172,9 +173,11 @@ public sealed class OptimizedPartition
         while (true)
         {
             var head = Volatile.Read(ref _head);
-            var targetHead = tail - _capacity;
+            var targetHead = tail - Capacity;
             if (targetHead <= head)
+            {
                 return; // No advance needed
+            }
 
             // Attempt to move head in one step
             if (Interlocked.CompareExchange(ref _head, targetHead, head) == head)
@@ -184,7 +187,7 @@ public sealed class OptimizedPartition
                 {
                     for (long i = head; i < targetHead; i++)
                     {
-                        var index = (int)(i % _capacity);
+                        var index = (int)(i % Capacity);
                         var eventItem = GetEventAt(index);
                         _onItemDiscarded(eventItem);
                     }
@@ -200,14 +203,7 @@ public sealed class OptimizedPartition
     /// </summary>    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private Event GetEventAt(int index)
     {
-        if (_layout == StorageLayout.AoS)
-        {
-            return _events![index];
-        }
-        else
-        {
-            return new Event(_keys![index], _values![index], _timestamps![index]);
-        }
+        return Layout == StorageLayout.AoS ? _events![index] : new Event(_keys![index], _values![index], _timestamps![index]);
     }
       /// <summary>
     /// Gets a read-only view of the partition.
@@ -218,23 +214,25 @@ public sealed class OptimizedPartition
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
         
-        int count = (int)Math.Min(_capacity, tail - head);
-        if (count <= 0) 
+        int count = (int)Math.Min(Capacity, tail - head);
+        if (count <= 0)
+        {
             return new PartitionView<Event>(
                 ReadOnlyMemory<Event>.Empty, 
                 ReadOnlyMemory<Event>.Empty, 
                 0, 
                 0, 
                 0);
-          // If using SoA layout, we need to create a temporary Event array
-        if (_layout == StorageLayout.SoA)
+        }
+        // If using SoA layout, we need to create a temporary Event array
+        if (Layout == StorageLayout.SoA)
         {
             var tempEvents = new Event[count];
-            var headPos = (int)(head % _capacity);
+            var headPos = (int)(head % Capacity);
             
             for (int i = 0; i < count; i++)
             {
-                var index = (headPos + i) % _capacity;
+                var index = (headPos + i) % Capacity;
                 tempEvents[i] = new Event(_keys![index], _values![index], _timestamps![index]);
             }
             
@@ -247,9 +245,9 @@ public sealed class OptimizedPartition
         }
         
         // For AoS layout, we can use the existing buffer directly
-        var headIndex = (int)(head % _capacity);
-        var tailIndex = (int)(tail % _capacity);
-        var isFull = count == _capacity;
+        var headIndex = (int)(head % Capacity);
+        var tailIndex = (int)(tail % Capacity);
+        var isFull = count == Capacity;
         
         if (tailIndex > headIndex || (isFull && headIndex == 0))
         {
@@ -261,12 +259,12 @@ public sealed class OptimizedPartition
                 ReadOnlyMemory<Event>.Empty, 
                 count,
                 _events![headIndex].TimestampTicks,
-                _events![(headIndex + count - 1) % _capacity].TimestampTicks);
+                _events![(headIndex + count - 1) % Capacity].TimestampTicks);
         }
         else
         {
             // Wrap-around case (including full buffer with headIndex > 0)
-            var segment1 = new ReadOnlyMemory<Event>(_events!, headIndex, _capacity - headIndex);
+            var segment1 = new ReadOnlyMemory<Event>(_events!, headIndex, Capacity - headIndex);
             var segment2 = new ReadOnlyMemory<Event>(_events!, 0, tailIndex);
             
             return new PartitionView<Event>(
@@ -274,7 +272,7 @@ public sealed class OptimizedPartition
                 segment2, 
                 count,
                 _events![headIndex].TimestampTicks,
-                _events![(tailIndex - 1 + _capacity) % _capacity].TimestampTicks);
+                _events![(tailIndex - 1 + Capacity) % Capacity].TimestampTicks);
         }
     }
       /// <summary>
@@ -282,18 +280,23 @@ public sealed class OptimizedPartition
     /// </summary>
     public ReadOnlySpan<KeyId> GetKeysSpan()
     {
-        if (_layout != StorageLayout.SoA)
+        if (Layout != StorageLayout.SoA)
+        {
             throw new InvalidOperationException("Direct key access is only available for SoA layout");
-        
+        }
+
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
         
-        int count = (int)Math.Min(_capacity, tail - head);
-        if (count <= 0) return ReadOnlySpan<KeyId>.Empty;
+        int count = (int)Math.Min(Capacity, tail - head);
+        if (count <= 0)
+        {
+            return ReadOnlySpan<KeyId>.Empty;
+        }
+
+        var headIndex = (int)(head % Capacity);
         
-        var headIndex = (int)(head % _capacity);
-        
-        if (headIndex + count <= _capacity)
+        if (headIndex + count <= Capacity)
         {
             // No wrap-around
             return new ReadOnlySpan<KeyId>(_keys!, headIndex, count);
@@ -304,7 +307,7 @@ public sealed class OptimizedPartition
             var result = new KeyId[count];
             for (int i = 0; i < count; i++)
             {
-                result[i] = _keys![(headIndex + i) % _capacity];
+                result[i] = _keys![(headIndex + i) % Capacity];
             }
             return result;
         }
@@ -314,18 +317,23 @@ public sealed class OptimizedPartition
     /// </summary>
     public ReadOnlySpan<double> GetValuesSpan()
     {
-        if (_layout != StorageLayout.SoA)
+        if (Layout != StorageLayout.SoA)
+        {
             throw new InvalidOperationException("Direct value access is only available for SoA layout");
-        
+        }
+
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
         
-        int count = (int)Math.Min(_capacity, tail - head);
-        if (count <= 0) return ReadOnlySpan<double>.Empty;
+        int count = (int)Math.Min(Capacity, tail - head);
+        if (count <= 0)
+        {
+            return ReadOnlySpan<double>.Empty;
+        }
+
+        var headIndex = (int)(head % Capacity);
         
-        var headIndex = (int)(head % _capacity);
-        
-        if (headIndex + count <= _capacity)
+        if (headIndex + count <= Capacity)
         {
             // No wrap-around
             return new ReadOnlySpan<double>(_values!, headIndex, count);
@@ -336,7 +344,7 @@ public sealed class OptimizedPartition
             var result = new double[count];
             for (int i = 0; i < count; i++)
             {
-                result[i] = _values![(headIndex + i) % _capacity];
+                result[i] = _values![(headIndex + i) % Capacity];
             }
             return result;
         }
@@ -346,18 +354,23 @@ public sealed class OptimizedPartition
     /// </summary>
     public ReadOnlySpan<long> GetTimestampsSpan()
     {
-        if (_layout != StorageLayout.SoA)
+        if (Layout != StorageLayout.SoA)
+        {
             throw new InvalidOperationException("Direct timestamp access is only available for SoA layout");
-        
+        }
+
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
         
-        int count = (int)Math.Min(_capacity, tail - head);
-        if (count <= 0) return ReadOnlySpan<long>.Empty;
+        int count = (int)Math.Min(Capacity, tail - head);
+        if (count <= 0)
+        {
+            return ReadOnlySpan<long>.Empty;
+        }
+
+        var headIndex = (int)(head % Capacity);
         
-        var headIndex = (int)(head % _capacity);
-        
-        if (headIndex + count <= _capacity)
+        if (headIndex + count <= Capacity)
         {
             // No wrap-around
             return new ReadOnlySpan<long>(_timestamps!, headIndex, count);
@@ -368,7 +381,7 @@ public sealed class OptimizedPartition
             var result = new long[count];
             for (int i = 0; i < count; i++)
             {
-                result[i] = _timestamps![(headIndex + i) % _capacity];
+                result[i] = _timestamps![(headIndex + i) % Capacity];
             }
             return result;
         }
@@ -386,18 +399,23 @@ public sealed class OptimizedPartition
     /// </summary>
     public void GetKeysZeroAlloc(Action<ReadOnlySpan<KeyId>> processor)
     {
-        if (_layout != StorageLayout.SoA)
+        if (Layout != StorageLayout.SoA)
+        {
             throw new InvalidOperationException("Direct key access is only available for SoA layout");
-        
+        }
+
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
         
-        int count = (int)Math.Min(_capacity, tail - head);
-        if (count <= 0) return;
+        int count = (int)Math.Min(Capacity, tail - head);
+        if (count <= 0)
+        {
+            return;
+        }
+
+        var headIndex = (int)(head % Capacity);
         
-        var headIndex = (int)(head % _capacity);
-        
-        if (headIndex + count <= _capacity)
+        if (headIndex + count <= Capacity)
         {
             // No wrap-around - direct access
             processor(new ReadOnlySpan<KeyId>(_keys!, headIndex, count));
@@ -409,7 +427,7 @@ public sealed class OptimizedPartition
             {
                 for (int i = 0; i < count; i++)
                 {
-                    buffer[i] = _keys![(headIndex + i) % _capacity];
+                    buffer[i] = _keys![(headIndex + i) % Capacity];
                 }
                 processor(buffer.AsSpan(0, count));
             }, ArrayPool<KeyId>.Shared);
@@ -421,18 +439,23 @@ public sealed class OptimizedPartition
     /// </summary>
     public void GetValuesZeroAlloc(Action<ReadOnlySpan<double>> processor)
     {
-        if (_layout != StorageLayout.SoA)
+        if (Layout != StorageLayout.SoA)
+        {
             throw new InvalidOperationException("Direct value access is only available for SoA layout");
-        
+        }
+
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
         
-        int count = (int)Math.Min(_capacity, tail - head);
-        if (count <= 0) return;
+        int count = (int)Math.Min(Capacity, tail - head);
+        if (count <= 0)
+        {
+            return;
+        }
+
+        var headIndex = (int)(head % Capacity);
         
-        var headIndex = (int)(head % _capacity);
-        
-        if (headIndex + count <= _capacity)
+        if (headIndex + count <= Capacity)
         {
             // No wrap-around - direct access
             processor(new ReadOnlySpan<double>(_values!, headIndex, count));
@@ -444,7 +467,7 @@ public sealed class OptimizedPartition
             {
                 for (int i = 0; i < count; i++)
                 {
-                    buffer[i] = _values![(headIndex + i) % _capacity];
+                    buffer[i] = _values![(headIndex + i) % Capacity];
                 }
                 processor(buffer.AsSpan(0, count));
             }, Buffers.DoublePool);
@@ -456,18 +479,23 @@ public sealed class OptimizedPartition
     /// </summary>
     public void GetTimestampsZeroAlloc(Action<ReadOnlySpan<long>> processor)
     {
-        if (_layout != StorageLayout.SoA)
+        if (Layout != StorageLayout.SoA)
+        {
             throw new InvalidOperationException("Direct timestamp access is only available for SoA layout");
-        
+        }
+
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
         
-        int count = (int)Math.Min(_capacity, tail - head);
-        if (count <= 0) return;
+        int count = (int)Math.Min(Capacity, tail - head);
+        if (count <= 0)
+        {
+            return;
+        }
+
+        var headIndex = (int)(head % Capacity);
         
-        var headIndex = (int)(head % _capacity);
-        
-        if (headIndex + count <= _capacity)
+        if (headIndex + count <= Capacity)
         {
             // No wrap-around - direct access
             processor(new ReadOnlySpan<long>(_timestamps!, headIndex, count));
@@ -479,7 +507,7 @@ public sealed class OptimizedPartition
             {
                 for (int i = 0; i < count; i++)
                 {
-                    buffer[i] = _timestamps![(headIndex + i) % _capacity];
+                    buffer[i] = _timestamps![(headIndex + i) % Capacity];
                 }
                 processor(buffer.AsSpan(0, count));
             }, Buffers.LongPool);
@@ -495,7 +523,7 @@ public sealed class OptimizedPartition
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
         
-        int count = (int)Math.Min(_capacity, tail - head);
+        int count = (int)Math.Min(Capacity, tail - head);
         if (count <= 0) 
         {
             processor(new PartitionView<Event>(
@@ -507,15 +535,15 @@ public sealed class OptimizedPartition
             return;
         }
           // If using SoA layout, use pooled buffer for temporary Event array
-        if (_layout == StorageLayout.SoA)
+        if (Layout == StorageLayout.SoA)
         {
             Buffers.WithRentedBuffer<Event>(count, tempEvents =>
             {
-                var headPos = (int)(head % _capacity);
+                var headPos = (int)(head % Capacity);
                 
                 for (int i = 0; i < count; i++)
                 {
-                    var index = (headPos + i) % _capacity;
+                    var index = (headPos + i) % Capacity;
                     tempEvents[i] = new Event(_keys![index], _values![index], _timestamps![index]);
                 }
                 
@@ -530,9 +558,9 @@ public sealed class OptimizedPartition
         else
         {
             // For AoS layout, we can use the existing buffer directly
-            var headIndex = (int)(head % _capacity);
-            var tailIndex = (int)(tail % _capacity);
-            var isFull = count == _capacity;
+            var headIndex = (int)(head % Capacity);
+            var tailIndex = (int)(tail % Capacity);
+            var isFull = count == Capacity;
             
             if (tailIndex > headIndex || (isFull && headIndex == 0))
             {
@@ -544,12 +572,12 @@ public sealed class OptimizedPartition
                     ReadOnlyMemory<Event>.Empty, 
                     count,
                     _events![headIndex].TimestampTicks,
-                    _events![(headIndex + count - 1) % _capacity].TimestampTicks));
+                    _events![(headIndex + count - 1) % Capacity].TimestampTicks));
             }
             else
             {
                 // Wrap-around case (including full buffer with headIndex > 0)
-                var segment1 = new ReadOnlyMemory<Event>(_events!, headIndex, _capacity - headIndex);
+                var segment1 = new ReadOnlyMemory<Event>(_events!, headIndex, Capacity - headIndex);
                 var segment2 = new ReadOnlyMemory<Event>(_events!, 0, tailIndex);
                 
                 processor(new PartitionView<Event>(
@@ -557,7 +585,7 @@ public sealed class OptimizedPartition
                     segment2, 
                     count,
                     _events![headIndex].TimestampTicks,
-                    _events![(tailIndex - 1 + _capacity) % _capacity].TimestampTicks));
+                    _events![(tailIndex - 1 + Capacity) % Capacity].TimestampTicks));
             }
         }
     }

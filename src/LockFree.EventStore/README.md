@@ -1,6 +1,6 @@
 # LockFree.EventStore
 [![CI](https://github.com/daniloneto/lockfree-eventstore/actions/workflows/ci.yml/badge.svg)](https://github.com/daniloneto/lockfree-eventstore/actions)
-[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.Event.Store)
+[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.EventStore)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=daniloneto_lockfree-eventstore&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=daniloneto_lockfree-eventstore)
 **An in-memory event store, running as a service, to synchronize and validate operations across multiple instances with high concurrency and no locks.**
 
@@ -100,16 +100,16 @@ var total = store.Aggregate(() => 0m, (acc, e) => acc + e.Valor,
 ## New Constructors
 ```csharp
 // Explicit capacity
-var store = new EventStore<Pedido>(capacidade: 100_000);
+var store = new EventStore<Pedido>(capacity: 100_000);
 
 // Capacity and partitions
-var store = new EventStore<Pedido>(capacidade: 50_000, particoes: 8);
+var store = new EventStore<Pedido>(capacity: 50_000, partitions: 8);
 
 // Advanced configuration
 var store = new EventStore<Pedido>(new EventStoreOptions<Pedido>
 {
-    Capacidade = 100_000,
-    Particoes = 16,
+    Capacity = 100_000,
+    Partitions = 16,
     OnEventDiscarded = evt => Logger.LogTrace("Event discarded: {Event}", evt),
     OnCapacityReached = () => Metrics.IncrementCounter("eventstore.capacity_reached"),
     TimestampSelector = new PedidoTimestampSelector(),
@@ -118,7 +118,7 @@ var store = new EventStore<Pedido>(new EventStoreOptions<Pedido>
 });
 
 // Fluent API
-var store = EventStore.For<Pedido>()
+var store = new EventStoreBuilder<Pedido>()
     .WithCapacity(100_000)
     .WithPartitions(8)
     .OnDiscarded(evt => Log(evt))

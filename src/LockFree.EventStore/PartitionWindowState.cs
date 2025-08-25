@@ -73,15 +73,10 @@ internal struct SumAggregateState<TResult>
 /// <summary>
 /// Internal state for tracking removed items during window advancement.
 /// </summary>
-internal struct WindowRemoveState
+[method: MethodImpl(MethodImplOptions.AggressiveInlining)]
+internal struct WindowRemoveState(long removedCount)
 {
-    public long RemovedCount;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public WindowRemoveState(long removedCount)
-    {
-        RemovedCount = removedCount;
-    }
+    public long RemovedCount = removedCount;
 }
 
 /// <summary>
@@ -140,7 +135,7 @@ internal struct PartitionWindowState
 
     // Bucket ring for O(1) evict/apply
     public AggregateBucket[]? Buckets;
-    public int BucketHead; // index of the bucket that starts at WindowStartTicks
+    public int BucketHead; // index of the bucket that contains WindowStartTicks (floor-aligned to BucketWidthTicks)
     public long BucketWidthTicks;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

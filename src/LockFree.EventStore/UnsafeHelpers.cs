@@ -74,11 +74,9 @@ internal static class PerformanceHelpers
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static int FastMod(int value, int powerOfTwoDivisor)
     {
-        if (!IsPowerOfTwo(powerOfTwoDivisor))
-        {
-            throw new ArgumentOutOfRangeException(nameof(powerOfTwoDivisor), "Divisor must be a positive power of two.");
-        }
-        return value & (powerOfTwoDivisor - 1);
+        return !IsPowerOfTwo(powerOfTwoDivisor)
+            ? throw new ArgumentOutOfRangeException(nameof(powerOfTwoDivisor), "Divisor must be a positive power of two.")
+            : value & (powerOfTwoDivisor - 1);
     }
 
     /// <summary>
@@ -88,11 +86,9 @@ internal static class PerformanceHelpers
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static long FastMod(long value, long powerOfTwoDivisor)
     {
-        if (!IsPowerOfTwo(powerOfTwoDivisor))
-        {
-            throw new ArgumentOutOfRangeException(nameof(powerOfTwoDivisor), "Divisor must be a positive power of two.");
-        }
-        return value & (powerOfTwoDivisor - 1);
+        return !IsPowerOfTwo(powerOfTwoDivisor)
+            ? throw new ArgumentOutOfRangeException(nameof(powerOfTwoDivisor), "Divisor must be a positive power of two.")
+            : value & (powerOfTwoDivisor - 1);
     }
 
     /// <summary>

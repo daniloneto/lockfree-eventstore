@@ -1,7 +1,4 @@
 using System.Buffers;
-using System.Collections.Concurrent;
-using System.Numerics;
-using System.Threading;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -14,7 +11,6 @@ namespace LockFree.EventStore;
 public sealed class SpecializedEventStore
 {
     private readonly LockFreeEventRingBuffer[] _partitions;
-    private readonly EventStoreStatistics _statistics;
     private readonly KeyMap _keyMap; // Hot path optimization
 
     // Window state per partition for incremental aggregation
@@ -39,7 +35,7 @@ public sealed class SpecializedEventStore
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
 
-        _statistics = new EventStoreStatistics();
+        Statistics = new EventStoreStatistics();
         _keyMap = new KeyMap();
         _partitions = new LockFreeEventRingBuffer[partitions];
 
@@ -103,7 +99,7 @@ public sealed class SpecializedEventStore
     /// <summary>
     /// Gets the statistics for this event store.
     /// </summary>
-    public EventStoreStatistics Statistics => _statistics;
+    public EventStoreStatistics Statistics { get; }
 
     // --- String <-> KeyId bridge (uses _keyMap) ---
 
@@ -190,7 +186,7 @@ public sealed class SpecializedEventStore
     {
         var partition = GetPartition(e.Key);
         _ = _partitions[partition].TryEnqueue(e);
-        _statistics.RecordAppend();
+        Statistics.RecordAppend();
     }
 
     /// <summary>
@@ -266,7 +262,7 @@ public sealed class SpecializedEventStore
                 }
             }
 
-            _statistics.IncrementTotalAdded(events.Length);
+            Statistics.IncrementTotalAdded(events.Length);
         }
         finally
         {
@@ -340,11 +336,9 @@ public sealed class SpecializedEventStore
         var partition = GetPartition(key);
         var partitionBuffer = _partitions[partition];
 
-        if (from.HasValue && to.HasValue)
-        {
-            return partitionBuffer.EnumerateSnapshot(key, from.Value.Ticks, to.Value.Ticks);
-        }
-        return from.HasValue
+        return from.HasValue && to.HasValue
+            ? partitionBuffer.EnumerateSnapshot(key, from.Value.Ticks, to.Value.Ticks)
+            : from.HasValue
             ? partitionBuffer.EnumerateSnapshot(e => e.Key.Equals(key) && e.TimestampTicks >= from.Value.Ticks)
             : to.HasValue
                 ? partitionBuffer.EnumerateSnapshot(e => e.Key.Equals(key) && e.TimestampTicks <= to.Value.Ticks)
@@ -431,7 +425,7 @@ public sealed class SpecializedEventStore
 
     private void OnEventDiscardedInternal(Event discardedEvent)
     {
-        _statistics.RecordDiscard();
+        Statistics.RecordDiscard();
         // Additional logic for discarded events can be added here
     }
 
