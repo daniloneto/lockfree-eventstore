@@ -18,7 +18,12 @@ public sealed class LockFreeEventRingBuffer
 
     /// <summary>
     /// Initializes a new instance with the specified capacity.
+    /// <summary>
+    /// Initializes a new instance of <see cref="LockFreeEventRingBuffer"/> with the specified capacity.
     /// </summary>
+    /// <param name="capacity">Positive number of slots to allocate for the ring buffer.</param>
+    /// <param name="onItemDiscarded">Optional callback invoked when an item is overwritten due to capacity pressure.</param>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="capacity"/> is less than or equal to zero.</exception>
     public LockFreeEventRingBuffer(int capacity, Action<Event>? onItemDiscarded = null)
     {
         // CA1512: prefer guard method
@@ -51,7 +56,19 @@ public sealed class LockFreeEventRingBuffer
 
     /// <summary>
     /// Enqueues a single event, overwriting the oldest if necessary.
+    /// <summary>
+    /// Atomically appends an <see cref="Event"/> to the ring buffer. If the buffer is full this
+    /// will overwrite the oldest item and, if configured, invoke the discard callback for the
+    /// overwritten event.
     /// </summary>
+    /// <param name="item">The event to enqueue.</param>
+    /// <returns>Always returns <c>true</c> after the item has been placed into the buffer.</returns>
+    /// <remarks>
+    /// This method is lock-free and safe to call concurrently. It advances the internal tail
+    /// index and will attempt to advance the head to maintain the ring invariant when overwrites occur.
+    /// The internal epoch counter is incremented infrequently (once every 256 enqueues) to assist
+    /// with snapshot consistency mechanisms.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryEnqueue(Event item)
     {
@@ -81,7 +98,17 @@ public sealed class LockFreeEventRingBuffer
     /// <summary>
     /// Enqueues a batch of events with optimized epoch updating.
     /// Only updates epoch once for the entire batch instead of per item.
+    /// <summary>
+    /// Atomically reserves space and appends a contiguous batch of events into the ring buffer.
     /// </summary>
+    /// <remarks>
+    /// This method reserves space for the entire <paramref name="batch"/> in a single atomic operation and then writes all items into their reserved slots.
+    /// If the enqueue causes older entries to be overwritten, the optional discard callback provided to the buffer constructor will be invoked for each overwritten item.
+    /// The buffer head may be advanced to maintain the ring invariant and the internal epoch is incremented once for the whole batch.
+    /// The operation is non-blocking and performs no allocation.
+    /// </remarks>
+    /// <param name="batch">The sequence of events to append. If empty, the method returns 0 and does nothing.</param>
+    /// <returns>The number of events enqueued (equal to <paramref name="batch"/>.Length when non-empty, or 0 if <paramref name="batch"/> is empty).</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int TryEnqueueBatch(ReadOnlySpan<Event> batch)
     {
@@ -129,7 +156,12 @@ public sealed class LockFreeEventRingBuffer
 
     /// <summary>
     /// Gets a snapshot of current events without enumeration allocation.
+    /// <summary>
+    /// Returns a point-in-time snapshot of the buffer's contents as an ordered sequence from oldest to newest.
     /// </summary>
+    /// <remarks>
+    /// The snapshot reflects the state at the time of call by reading the ring's head and tail; subsequent concurrent modifications are not reflected. The returned <see cref="IEnumerable{Event}"/> is backed by a newly allocated <see cref="List{Event}"/> containing at most <see cref="Capacity"/> items.
+    /// </remarks>
     public IEnumerable<Event> EnumerateSnapshot()
     {
         var head = Volatile.Read(ref _head);
@@ -147,7 +179,11 @@ public sealed class LockFreeEventRingBuffer
 
     /// <summary>
     /// Enumerates events with a filter predicate.
+    /// <summary>
+    /// Returns a point-in-time snapshot of events that satisfy the provided predicate.
     /// </summary>
+    /// <param name="predicate">Predicate applied to each event; events for which this returns true are included.</param>
+    /// <returns>A new list containing matching events in buffer order representing the snapshot at the time of the call.</returns>
     public IEnumerable<Event> EnumerateSnapshot(Func<Event, bool> predicate)
     {
         var head = Volatile.Read(ref _head);
@@ -194,7 +230,15 @@ public sealed class LockFreeEventRingBuffer
     /// <summary>
     /// Purges events older than the specified timestamp.
     /// Returns the number of events purged.
+    /// <summary>
+    /// Removes (advances past) all events with TimestampTicks earlier than <paramref name="beforeTimestamp"/> and returns how many were removed.
     /// </summary>
+    /// <param name="beforeTimestamp">Exclusive upper bound; events with TimestampTicks &lt; this value are purged.</param>
+    /// <returns>The number of events removed from the buffer.</returns>
+    /// <remarks>
+    /// If any events are purged the buffer head is advanced and the internal epoch is incremented to signal a state change.
+    /// The scan stops at the first non-matching event (the method assumes events are roughly time-ordered within the current window).
+    /// </remarks>
     public long Purge(long beforeTimestamp)
     {
         var head = Volatile.Read(ref _head);
@@ -230,6 +274,15 @@ public sealed class LockFreeEventRingBuffer
         return purged;
     }
 
+    /// <summary>
+    /// Advances the ring buffer head if the provided tail index would otherwise make the buffer exceed its capacity.
+    /// </summary>
+    /// <param name="newTail">The new tail index (exclusive write position) used to compute the minimum allowed head: <c>newTail - Capacity</c>.</param>
+    /// <remarks>
+    /// Performs a best-effort, lock-free update: if the computed target head is strictly greater than the current head,
+    /// the method attempts an atomic compare-and-swap to move <c>_head</c> to the target value. If another thread advances
+    /// the head first, this call has no effect.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void AdvanceHeadIfNeeded(long newTail)
     {
@@ -245,7 +298,16 @@ public sealed class LockFreeEventRingBuffer
 
     /// <summary>
     /// Gets buffer statistics for debugging and monitoring.
+    /// <summary>
+    /// Reads and returns a snapshot of the buffer's current positional statistics.
     /// </summary>
+    /// <returns>
+    /// A tuple containing:
+    /// Head — the index of the oldest item (volatile read);
+    /// Tail — the next write index (volatile read);
+    /// Epoch — the current epoch counter (volatile read);
+    /// Count — the approximate number of items currently stored (clamped to [0, Capacity]).
+    /// </returns>
     public (long Head, long Tail, int Epoch, long Count) GetStatistics()
     {
         var head = Volatile.Read(ref _head);
@@ -258,7 +320,17 @@ public sealed class LockFreeEventRingBuffer
 
     /// <summary>
     /// Zero-allocation snapshot using chunked processing with pooled buffers.
+    /// <summary>
+    /// Creates a point-in-time, zero-allocation snapshot of the buffer and invokes <paramref name="processor"/> for each chunk of events.
     /// </summary>
+    /// <remarks>
+    /// The snapshot covers up to <see cref="Capacity"/> most recent events between the current head and tail at the time of calling.
+    /// Events are copied into a rented array in chunks and passed to <paramref name="processor"/> as a <see cref="ReadOnlySpan{Event}"/>.
+    /// The method does not allocate per-item memory; it uses the shared event pool and may invoke <paramref name="processor"/> multiple times.
+    /// The final invocation may contain fewer than <paramref name="chunkSize"/> items.
+    /// </remarks>
+    /// <param name="processor">Action to process each populated span of events.</param>
+    /// <param name="chunkSize">Maximum number of events provided to <paramref name="processor"/> per invocation. Defaults to <c>Buffers.DefaultChunkSize</c>.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void SnapshotZeroAlloc(Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
     {
@@ -299,7 +371,16 @@ public sealed class LockFreeEventRingBuffer
 
     /// <summary>
     /// Zero-allocation filtered snapshot using chunked processing.
+    /// <summary>
+    /// Performs a point-in-time, zero-allocation snapshot of stored events that match the given predicate and invokes a processor for those events in contiguous chunks.
     /// </summary>
+    /// <param name="predicate">Filter applied to each event; only matching events are buffered and passed to <paramref name="processor"/>.</param>
+    /// <param name="processor">Called one or more times with a <see cref="ReadOnlySpan{Event}"/> containing up to <paramref name="chunkSize"/> matching events in chronological order.</param>
+    /// <param name="chunkSize">Maximum number of matching events provided to <paramref name="processor"/> per invocation (defaults to <c>Buffers.DefaultChunkSize</c>).</param>
+    /// <remarks>
+    /// The method captures a snapshot of the current head/tail window and processes events from oldest to newest without allocating intermediate collections.
+    /// If there are no events in the snapshot, the method returns immediately. The processor may be invoked multiple times; each invocation receives a contiguous span of matching events.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void SnapshotFilteredZeroAlloc(Func<Event, bool> predicate, Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
     {

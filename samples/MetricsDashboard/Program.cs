@@ -6,6 +6,16 @@ namespace MetricsDashboard;
 
 internal static class Program
 {
+    /// <summary>
+    /// Application entry point: builds and runs the MetricsDashboard web application.
+    /// </summary>
+    /// <remarks>
+    /// Configures in-memory event stores for metrics and gateway/order events, registers HTTP route groups
+    /// (health, stream/order endpoints, metric endpoints, and admin endpoints), then starts the web host
+    /// and runs until shutdown.
+    /// </remarks>
+    /// <param name="args">Command-line arguments forwarded to the web host builder.</param>
+    /// <returns>A task that completes when the web application shuts down.</returns>
     public static async Task Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
@@ -35,6 +45,10 @@ internal static class Program
         await app.RunAsync();
     }
 
+    /// <summary>
+    /// Registers a GET health-check endpoint at "/health" on the provided <see cref="WebApplication"/>.
+    /// The endpoint returns HTTP 200 with the plain text body "OK".
+    /// </summary>
     private static void MapHealth(WebApplication app)
     {
         _ = app.MapGet("/health", () => Results.Ok("OK"));

@@ -35,12 +35,21 @@ public sealed class EventStoreStatistics
         }
     }
 
+    /// <summary>
+    /// Atomically increments the total appended-events counter and updates <see cref="LastAppendTime"/> to the current UTC time.
+    /// </summary>
+    /// <remarks>
+    /// Safe for concurrent use; the counter is updated with an atomic operation so multiple threads may call this method concurrently.
+    /// </remarks>
     internal void RecordAppend()
     {
         _ = Interlocked.Increment(ref _totalAppended);
         LastAppendTime = DateTime.UtcNow;
     }
 
+    /// <summary>
+    /// Atomically increments the count of events discarded due to capacity limits.
+    /// </summary>
     internal void RecordDiscard()
     {
         _ = Interlocked.Increment(ref _totalDiscarded);
@@ -48,7 +57,12 @@ public sealed class EventStoreStatistics
 
     /// <summary>
     /// Increments the total added counter by 1.
+    /// <summary>
+    /// Atomically increments the total-appended counter by one and updates <see cref="LastAppendTime"/> to the current UTC time.
     /// </summary>
+    /// <remarks>
+    /// This method is thread-safe and uses an atomic increment to update the internal counter.
+    /// </remarks>
     internal void IncrementTotalAdded()
     {
         _ = Interlocked.Increment(ref _totalAppended);
@@ -57,7 +71,10 @@ public sealed class EventStoreStatistics
 
     /// <summary>
     /// Increments the total added counter by the specified amount.
+    /// <summary>
+    /// Atomically increases the total appended count by the specified amount and updates LastAppendTime to the current UTC time.
     /// </summary>
+    /// <param name="count">Number of appended items to add to the total.</param>
     internal void IncrementTotalAdded(int count)
     {
         _ = Interlocked.Add(ref _totalAppended, count);
@@ -65,12 +82,21 @@ public sealed class EventStoreStatistics
     }
     /// <summary>
     /// Increments the overwritten counter.
+    /// <summary>
+    /// Atomically increments the counter of discarded (overwritten) events by one.
     /// </summary>
     internal void IncrementOverwritten()
     {
         _ = Interlocked.Increment(ref _totalDiscarded);
     }
 
+    /// <summary>
+    /// Resets the accumulated statistics for this EventStoreStatistics instance.
+    /// </summary>
+    /// <remarks>
+    /// Sets the total appended and total discarded counters to zero and clears the last append timestamp.
+    /// The counter writes are performed using volatile semantics to make the reset visible across threads.
+    /// </remarks>
     internal void Reset()
     {
         Volatile.Write(ref _totalAppended, 0);

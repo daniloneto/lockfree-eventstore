@@ -51,7 +51,13 @@ internal struct PartitionHeader(int capacity)
 
     /// <summary>
     /// Atomically increments the epoch counter.
+    /// <summary>
+    /// Atomically increments the partition's epoch counter.
     /// </summary>
+    /// <remarks>
+    /// Uses an atomic increment to advance <c>Epoch</c>, ensuring a thread-safe version bump
+    /// for coordination or consistency checks across producers and consumers.
+    /// </remarks>
     public void IncrementEpoch()
     {
         _ = Interlocked.Increment(ref Epoch);
@@ -59,7 +65,14 @@ internal struct PartitionHeader(int capacity)
 
     /// <summary>
     /// Gets the current approximate count of items.
+    /// <summary>
+    /// Returns an approximate number of items currently in the partition.
     /// </summary>
+    /// <remarks>
+    /// The value is computed as (tail - head), read with volatile semantics and clamped to the range [0, Capacity].
+    /// Because producers/consumers may update positions concurrently, the result is an approximation and may be slightly stale.
+    /// </remarks>
+    /// <returns>The approximate count of items in the partition, clamped between 0 and Capacity.</returns>
     public long GetApproximateCount()
     {
         var head = Volatile.Read(ref Head);

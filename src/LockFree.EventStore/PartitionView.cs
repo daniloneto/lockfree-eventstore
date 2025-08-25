@@ -36,7 +36,15 @@ public readonly record struct PartitionView<T>(
     /// <summary>
     /// Gets the total memory span of all segments combined.
     /// Note: This only works if there's no wrap-around (single segment).
+    /// <summary>
+    /// Returns a contiguous ReadOnlySpan&lt;T&gt; covering the view's data when the view is not wrapped.
     /// </summary>
+    /// <returns>
+    /// A ReadOnlySpan&lt;T&gt; representing the view's single contiguous segment (Segment1).
+    /// </returns>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown if the view contains wrap-around data (Segment2 is non-empty). In that case, use GetEnumerator() to iterate.
+    /// </exception>
     public ReadOnlySpan<T> AsSpan()
     {
         return HasWrapAround
@@ -75,7 +83,12 @@ public ref struct PartitionViewEnumerator<T>
 
     /// <summary>
     /// Advances to the next event.
+    /// <summary>
+    /// Advances the enumerator to the next element in the partition view, traversing the first segment and then the optional second (wrap-around) segment.
     /// </summary>
+    /// <returns>
+    /// True if the enumerator was successfully advanced to the next element; false if the end of both segments has been reached.
+    /// </returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool MoveNext()
     {

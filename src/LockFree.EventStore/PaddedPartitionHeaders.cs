@@ -19,7 +19,15 @@ internal sealed class PaddedPartitionHeaders
     /// Creates a new array of padded partition headers.
     /// </summary>
     /// <param name="partitionCount">Number of partitions</param>
-    /// <param name="capacityPerPartition">Capacity for each partition</param>
+    /// <summary>
+    /// Creates a PaddedPartitionHeaders container for the specified number of partitions and initializes each partition header.
+    /// </summary>
+    /// <param name="partitionCount">Number of partition headers to allocate and expose via the <see cref="Count"/> property.</param>
+    /// <param name="capacityPerPartition">Initial capacity passed to each <see cref="PartitionHeader"/> instance.</param>
+    /// <remarks>
+    /// The constructor allocates backing storage sized and laid out so each <see cref="PartitionHeader"/> starts on a 64-byte cache-line boundary (see <see cref="CacheLineSize"/>),
+    /// then constructs a <see cref="PartitionHeader"/> for each partition index [0 .. partitionCount-1] using <paramref name="capacityPerPartition"/>.
+    /// </remarks>
     public PaddedPartitionHeaders(int partitionCount, int capacityPerPartition)
     {
         Count = partitionCount;
@@ -44,7 +52,12 @@ internal sealed class PaddedPartitionHeaders
 
     /// <summary>
     /// Gets the array index for a partition that ensures cache line isolation.
+    /// <summary>
+    /// Maps a logical partition index to the backing array index that ensures each partition's
+    /// header is laid out to avoid false sharing by placing it on a separate cache line when possible.
     /// </summary>
+    /// <param name="partitionIndex">Zero-based partition index.</param>
+    /// <returns>The array index corresponding to the padded location for the given partition.</returns>
     private static int GetPaddedIndex(int partitionIndex)
     {
         // Calculate the index that places each header on its own cache line
@@ -64,7 +77,13 @@ internal sealed class PaddedPartitionHeaders
 
     /// <summary>
     /// Gets a reference to the header for the specified partition.
+    /// <summary>
+    /// Returns a reference to the PartitionHeader for the specified zero-based partition index,
+    /// taking into account per-partition padding so each header occupies a separate cache line.
     /// </summary>
+    /// <param name="partitionIndex">Zero-based index of the partition; must be in range [0, <see cref="Count"/>).</param>
+    /// <returns>By-reference access to the PartitionHeader for the given partition.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="partitionIndex"/> is negative or is greater than or equal to <see cref="Count"/>.</exception>
     public ref PartitionHeader GetHeader(int partitionIndex)
     {
         if (partitionIndex < 0 || partitionIndex >= Count)
@@ -83,7 +102,10 @@ internal sealed class PaddedPartitionHeaders
 
     /// <summary>
     /// Provides enumeration over all partition headers.
+    /// <summary>
+    /// Returns an enumerator that iterates the partition headers in partition order while respecting the cache-line padding layout.
     /// </summary>
+    /// <returns>A <see cref="HeaderEnumerator"/> for enumerating the padded partition headers.</returns>
     public HeaderEnumerator GetEnumerator()
     {
         return new(this);
@@ -97,12 +119,22 @@ internal sealed class PaddedPartitionHeaders
         private readonly PaddedPartitionHeaders _headers;
         private int _currentIndex;
 
+        /// <summary>
+        /// Initializes a new <see cref="HeaderEnumerator"/> for iterating the provided <see cref="PaddedPartitionHeaders"/>.
+        /// </summary>
+        /// <remarks>
+        /// The enumerator is positioned before the first element (call <see cref="MoveNext"/> to advance to the first header).
+        /// </remarks>
         internal HeaderEnumerator(PaddedPartitionHeaders headers)
         {
             _headers = headers;
             _currentIndex = -1;
         }
 
+        /// <summary>
+        /// Advances the enumerator to the next partition header.
+        /// </summary>
+        /// <returns>True if the enumerator successfully advanced to the next header; false if the end has been reached.</returns>
         public bool MoveNext()
         {
             _currentIndex++;

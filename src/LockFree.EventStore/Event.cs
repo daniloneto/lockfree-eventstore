@@ -16,7 +16,11 @@ public readonly struct EventTimestampSelector : IEventTimestampSelector<Event>
     /// Gets the timestamp from an Event.
     /// </summary>
     /// <param name="e">The event.</param>
-    /// <returns>The timestamp of the event.</returns>
+    /// <summary>
+    /// Returns the event's timestamp as a <see cref="DateTime"/> constructed from its <c>TimestampTicks</c>.
+    /// </summary>
+    /// <param name="e">The event whose timestamp to retrieve.</param>
+    /// <returns>A <see cref="DateTime"/> representing the event's timestamp.</returns>
     public DateTime GetTimestamp(Event e)
     {
         return new(e.TimestampTicks);
@@ -26,7 +30,11 @@ public readonly struct EventTimestampSelector : IEventTimestampSelector<Event>
     /// Gets the timestamp ticks from an Event.
     /// </summary>
     /// <param name="e">The event.</param>
-    /// <returns>The timestamp ticks of the event.</returns>
+    /// <summary>
+    /// Returns the raw timestamp ticks from the specified event.
+    /// </summary>
+    /// <param name="e">The event to read the timestamp from.</param>
+    /// <returns>The event's timestamp expressed as ticks.</returns>
     public long GetTimestampTicks(Event e)
     {
         return e.TimestampTicks;

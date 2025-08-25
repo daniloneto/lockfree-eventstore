@@ -23,6 +23,10 @@ internal struct WindowAggregateState
     public double Min;
     public double Max;
 
+    /// <summary>
+    /// Merges another WindowAggregateState into this one, combining counts, sums, and min/max bounds.
+    /// </summary>
+    /// <param name="other">The other partition's aggregate state to incorporate.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Merge(WindowAggregateState other)
     {
@@ -90,6 +94,12 @@ internal struct AggregateBucket
     public double Min;
     public double Max;
 
+    /// <summary>
+    /// Initializes the bucket to represent a new time window starting at the given tick and clears its aggregates.
+    /// After calling this, <see cref="Count"/> is 0, <see cref="Sum"/> is 0.0, and <see cref="Min"/>/<see cref="Max"/>
+    /// are set to extreme values to indicate an empty bucket.
+    /// </summary>
+    /// <param name="bucketStart">The starting tick (inclusive) for the bucket.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Reset(long bucketStart)
     {
@@ -100,6 +110,10 @@ internal struct AggregateBucket
         Max = double.MinValue;
     }
 
+    /// <summary>
+    /// Incorporates a sample into the bucket's running aggregates.
+    /// </summary>
+    /// <param name="value">The numeric sample to add; increments Count, adds to Sum, and updates Min/Max as needed.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Add(double value)
     {
@@ -138,6 +152,14 @@ internal struct PartitionWindowState
     public int BucketHead; // index of the bucket that contains WindowStartTicks (floor-aligned to BucketWidthTicks)
     public long BucketWidthTicks;
 
+    /// <summary>
+    /// Reset all partition window state to its initial defaults.
+    /// </summary>
+    /// <remarks>
+    /// Clears the logical window (start/end ticks, head index) and aggregation counters (count, sum).
+    /// Sets the running minimum to <see cref="double.MaxValue"/> and maximum to <see cref="double.MinValue"/> as sentinels,
+    /// and clears any bucket ring by setting <see cref="Buckets"/> to <c>null</c> and bucket-related fields to zero.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Reset()
     {
@@ -153,6 +175,11 @@ internal struct PartitionWindowState
         BucketWidthTicks = 0;
     }
 
+    /// <summary>
+    /// Adds a value to the running window aggregate, incrementing Count, adding to Sum,
+    /// and updating Min and Max as needed.
+    /// </summary>
+    /// <param name="value">The sample value to include in the aggregate.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void AddValue(double value)
     {
@@ -168,6 +195,13 @@ internal struct PartitionWindowState
         }
     }
 
+    /// <summary>
+    /// Removes a single observation from the running window aggregate.
+    /// </summary>
+    /// <param name="value">The value to remove; this decrements <see cref="Count"/> and subtracts from <see cref="Sum"/>.</param>
+    /// <remarks>
+    /// This method does not recompute Min/Max immediately — min/max recalculation is deferred and handled when buckets roll.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void RemoveValue(double value)
     {

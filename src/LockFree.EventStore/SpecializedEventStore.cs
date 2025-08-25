@@ -28,7 +28,13 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Initializes a new SpecializedEventStore with specified capacity and partitions.
+    /// <summary>
+    /// Initializes a new SpecializedEventStore with the specified total capacity and partition count.
     /// </summary>
+    /// <param name="capacity">Total target capacity for the store; will be divided across partitions (per-partition capacity = max(1, capacity / partitions)).</param>
+    /// <param name="partitions">Number of partitions (ring buffers) to create.</param>
+    /// <param name="onEventDiscarded">Optional callback invoked when an event is discarded; if provided, the store wires an internal discard handler that updates store statistics before invoking this callback.</param>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="capacity"/> or <paramref name="partitions"/> is less than or equal to zero.</exception>
     public SpecializedEventStore(int capacity, int partitions, Action<Event>? onEventDiscarded = null)
     {
         // CA1512: prefer guard methods
@@ -105,7 +111,11 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Resolves or creates a KeyId for the provided string key.
+    /// <summary>
+    /// Gets the canonical KeyId for the given string key, creating and registering a new KeyId if none exists.
     /// </summary>
+    /// <param name="key">The string key to resolve or register.</param>
+    /// <returns>The existing or newly created <see cref="KeyId"/> associated with the key.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public KeyId GetOrCreateKeyId(string key)
     {
@@ -114,7 +124,12 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Attempts to resolve a KeyId for the provided string key without creating a new one.
+    /// <summary>
+    /// Attempts to resolve an existing KeyId for the specified string key without creating a new mapping.
     /// </summary>
+    /// <param name="key">The string key to look up.</param>
+    /// <param name="id">When the method returns, contains the associated KeyId if found; otherwise the default KeyId.</param>
+    /// <returns>True if a mapping was found and <paramref name="id"/> was set; otherwise false.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryGetKeyId(string key, out KeyId id)
     {
@@ -128,7 +143,12 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Returns a snapshot of all string->KeyId mappings.
+    /// <summary>
+    /// Returns a snapshot of all registered string keys mapped to their corresponding <see cref="KeyId"/> values.
     /// </summary>
+    /// <returns>
+    /// A read-only dictionary containing the current string-to-<see cref="KeyId"/> mappings. The returned dictionary is a snapshot and will not reflect keys added after the call.
+    /// </returns>
     public IReadOnlyDictionary<string, KeyId> GetKeyMappings()
     {
         return _keyMap.GetAllMappings();
@@ -157,7 +177,16 @@ public sealed class SpecializedEventStore
     /// <summary>
     /// Queries events by string key within an optional time range.
     /// If the key was never seen, returns an empty sequence.
+    /// <summary>
+    /// Returns all events for the specified string key, optionally constrained to an inclusive time range.
     /// </summary>
+    /// <param name="key">The string key whose events to retrieve.</param>
+    /// <param name="from">Optional inclusive lower bound for event timestamps; if null, no lower bound is applied.</param>
+    /// <param name="to">Optional inclusive upper bound for event timestamps; if null, no upper bound is applied.</param>
+    /// <returns>A sequence of <see cref="Event"/> matching the key and time bounds. Returns an empty sequence if the key is not registered.</returns>
+    /// <remarks>
+    /// This method is obsolete. Use <see cref="QueryByKeyZeroAlloc(KeyId,Action{ReadOnlySpan{Event}},DateTime?,DateTime?)"/> for zero-allocation streaming.
+    /// </remarks>
     [Obsolete("Use QueryByKeyZeroAlloc(key, processor, from, to) for zero-allocation streaming. See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
     public IEnumerable<Event> Query(string key, DateTime? from = null, DateTime? to = null)
     {
@@ -180,7 +209,13 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Adds a single event to the store with optimized partitioning.
+    /// <summary>
+    /// Appends a single event to the store by enqueuing it into the partition determined from the event's key.
     /// </summary>
+    /// <param name="e">The event to append. May be discarded if the target partition's buffer is full.</param>
+    /// <remarks>
+    /// The method updates internal append statistics. It will not block; enqueue failures (due to capacity) are ignored here and are accounted for via the store's discard handling.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Add(Event e)
     {
@@ -200,7 +235,12 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Adds a single event by key, value, and DateTime.
+    /// <summary>
+    /// Adds an event with the specified key, value, and timestamp to the store.
     /// </summary>
+    /// <param name="key">Identifier for the event's key (KeyId).</param>
+    /// <param name="value">Numeric value of the event.</param>
+    /// <param name="timestamp">Event timestamp; the DateTime is converted to ticks for storage.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Add(KeyId key, double value, DateTime timestamp)
     {
@@ -210,7 +250,16 @@ public sealed class SpecializedEventStore
     /// <summary>
     /// Adds multiple events efficiently using batch operations grouped by partition.
     /// Uses pooled buffers to avoid allocations in hot path.
+    /// <summary>
+    /// Adds a contiguous span of events to the store in a single, partition-aware batch operation.
     /// </summary>
+    /// <remarks>
+    /// Distributes the supplied events to per-partition pooled buffers, enqueues each partition's
+    /// buffer in a single batch operation, and increments the store's add statistics. Uses rented
+    /// buffers from the shared Buffers pool to avoid allocations and returns them in a finally
+    /// block. Returns immediately if the input span is empty. The method does not return a value;
+    /// any per-partition enqueue result is intentionally discarded.
+    /// </remarks>
     public void AddRange(ReadOnlySpan<Event> events)
     {
         if (events.IsEmpty)
@@ -281,7 +330,10 @@ public sealed class SpecializedEventStore
     /// <summary>
     /// Adds multiple events from an enumerable.
     /// Uses chunked processing to avoid large allocations.
+    /// <summary>
+    /// Appends a sequence of events to the store, processing the source efficiently without allocating for common collection types.
     /// </summary>
+    /// <param name="events">The events to add. If <see cref="Event[]"/> or <see cref="List{Event}"/>, the implementation uses spans for zero-copy processing; otherwise events are consumed in pooled chunks to minimize allocations.</param>
     public void AddRange(IEnumerable<Event> events)
     {
         if (events is Event[] array)
@@ -329,7 +381,16 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Queries events by key within a time range.
+    /// <summary>
+    /// Returns a snapshot enumeration of events for the specified KeyId within the optional time range (inclusive).
     /// </summary>
+    /// <param name="key">KeyId identifying the event stream to query.</param>
+    /// <param name="from">Optional lower bound (inclusive) of event timestamps; when null there is no lower bound.</param>
+    /// <param name="to">Optional upper bound (inclusive) of event timestamps; when null there is no upper bound.</param>
+    /// <returns>An <see cref="IEnumerable{Event}"/> of events from the partition that contains <paramref name="key"/>, filtered by the provided time bounds.</returns>
+    /// <remarks>
+    /// This method is obsolete; prefer <c>QueryByKeyZeroAlloc(key, processor, from, to)</c> for zero-allocation streaming.
+    /// </remarks>
     [Obsolete("Use QueryByKeyZeroAlloc(key, processor, from, to) for zero-allocation streaming. See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
     public IEnumerable<Event> Query(KeyId key, DateTime? from = null, DateTime? to = null)
     {
@@ -347,7 +408,19 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Queries events across all partitions within a time range.
+    /// <summary>
+    /// Returns a materialized snapshot of all events across all partitions, optionally filtered by a time range.
     /// </summary>
+    /// <remarks>
+    /// This method is obsolete — prefer <see cref="QueryZeroAlloc(Action{ReadOnlySpan{Event}}, DateTime?, DateTime?)"/> for zero-allocation streaming.
+    /// The result is a newly allocated <see cref="List{Event}"/> aggregated from each partition at the time of the call.
+    /// When both <paramref name="from"/> and <paramref name="to"/> are provided, events with TimestampTicks in the inclusive range [from, to] are returned.
+    /// If only <paramref name="from"/> is provided, events with TimestampTicks >= from are returned; if only <paramref name="to"/> is provided, events with TimestampTicks <= to are returned.
+    /// If neither is provided, all events from all partitions are returned.
+    /// </remarks>
+    /// <param name="from">Optional lower bound (inclusive) of the event timestamp filter.</param>
+    /// <param name="to">Optional upper bound (inclusive) of the event timestamp filter.</param>
+    /// <returns>An IEnumerable&lt;Event&gt; containing the matching events as a materialized list.</returns>
     [Obsolete("Use QueryZeroAlloc(processor, from, to) for zero-allocation streaming. See new_feature.md.", DiagnosticId = "LF0001", UrlFormat = "https://github.com/daniloneto/lockfree-eventstore/blob/main/new_feature.md#compatibilidade-e-obsolesc%C3%AAncia")]
     public IEnumerable<Event> Query(DateTime? from = null, DateTime? to = null)
     {
@@ -391,7 +464,11 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Purges events older than the specified date from all partitions.
+    /// <summary>
+    /// Removes all events strictly older than the specified timestamp from every partition.
     /// </summary>
+    /// <param name="olderThan">Events with timestamps less than this DateTime are removed (strictly older).</param>
+    /// <returns>The total number of events removed across all partitions.</returns>
     public long Purge(DateTime olderThan)
     {
         var totalPurged = 0L;
@@ -407,7 +484,14 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Gets partition statistics for monitoring and debugging.
+    /// <summary>
+    /// Returns a snapshot of per-partition ring-buffer statistics.
     /// </summary>
+    /// <returns>
+    /// An enumerable of tuples, one per partition, containing:
+    /// (PartitionIndex, Head, Tail, Epoch, Count). The sequence is ordered by partition index;
+    /// values reflect each partition's statistics at the time they are read.
+    /// </returns>
     public IEnumerable<(int PartitionIndex, long Head, long Tail, int Epoch, long Count)> GetPartitionStatistics()
     {
         for (var i = 0; i < _partitions.Length; i++)
@@ -423,6 +507,10 @@ public sealed class SpecializedEventStore
         return Partitioners.ForKeyIdSimple(key, _partitions.Length);
     }
 
+    /// <summary>
+    /// Handles an event that was dropped from the store by recording the discard in Statistics.
+    /// </summary>
+    /// <param name="discardedEvent">The event instance that was discarded; provided for any additional handling implemented later.</param>
     private void OnEventDiscardedInternal(Event discardedEvent)
     {
         Statistics.RecordDiscard();
@@ -431,7 +519,13 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Aggregates values by key across all partitions.
+    /// <summary>
+    /// Aggregates the sum of Event.Value for each KeyId across all partitions and returns a mapping KeyId → sum.
     /// </summary>
+    /// <returns>
+    /// A new Dictionary where each key is a KeyId present in the store and the value is the sum of all Event.Value entries for that key
+    /// as observed by each partition's snapshot at the time of enumeration.
+    /// </returns>
     public Dictionary<KeyId, double> AggregateByKey()
     {
         var results = new Dictionary<KeyId, double>();
@@ -449,7 +543,15 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Aggregates values by key within a time range.
+    /// <summary>
+    /// Aggregates event values by KeyId for events whose timestamps fall within the specified time window.
     /// </summary>
+    /// <param name="from">Start of the time window (inclusive).</param>
+    /// <param name="to">End of the time window (inclusive).</param>
+    /// <returns>
+    /// A dictionary mapping each KeyId to the sum of its event values observed between <paramref name="from"/> and <paramref name="to"/>.
+    /// Returns an empty dictionary if no events are found in the window.
+    /// </returns>
     public Dictionary<KeyId, double> AggregateByKey(DateTime from, DateTime to)
     {
         var results = new Dictionary<KeyId, double>();
@@ -469,7 +571,14 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Gets the latest value for each key.
+    /// <summary>
+    /// Builds a snapshot of the most-recent event value for each KeyId across all partitions.
     /// </summary>
+    /// <returns>
+    /// A dictionary mapping each KeyId to a tuple of (Value, Timestamp). For each key the entry contains
+    /// the event with the highest TimestampTicks observed at call time; the Timestamp is constructed
+    /// from the event's ticks as a <see cref="DateTime"/>.
+    /// </returns>
     public Dictionary<KeyId, (double Value, DateTime Timestamp)> GetLatestValues()
     {
         var results = new Dictionary<KeyId, (double Value, DateTime Timestamp)>();
@@ -492,7 +601,15 @@ public sealed class SpecializedEventStore
     /// <summary>
     /// Zero-allocation snapshot using chunked processing with pooled buffers.
     /// Processes results in fixed-size chunks to avoid large allocations.
+    /// <summary>
+    /// Streams a point-in-time snapshot of all events, invoking <paramref name="processor"/> with contiguous, pooled chunks of events.
     /// </summary>
+    /// <param name="processor">Action invoked for each chunk; receives a ReadOnlySpan&lt;Event&gt; containing up to <paramref name="chunkSize"/> events. Calls are made synchronously on the calling thread.</param>
+    /// <param name="chunkSize">Maximum number of events provided to <paramref name="processor"/> per invocation. Defaults to <c>Buffers.DefaultChunkSize</c>. Must be &gt; 0.</param>
+    /// <remarks>
+    /// - The snapshot is taken partition-by-partition; ordering is preserved within each partition but not globally across partitions.
+    /// - Buffers are rented and returned to pools; the span passed to <paramref name="processor"/> is only valid for the duration of that call and must not be retained.
+    /// </remarks>
     public void SnapshotZeroAlloc(Action<ReadOnlySpan<Event>> processor, int chunkSize = Buffers.DefaultChunkSize)
     {
         Buffers.WithRentedBuffer(chunkSize, buffer =>
@@ -541,7 +658,20 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Zero-allocation query by key using chunked processing.
+    /// <summary>
+    /// Streams events for a single KeyId to the provided processor in zero-allocation, chunked slices.
     /// </summary>
+    /// <remarks>
+    /// The method locates the partition for <paramref name="key"/> and invokes a partition-level
+    /// zero-allocation snapshot that calls <paramref name="processor"/> with ReadOnlySpan&lt;Event&gt;
+    /// segments that match the key and optional time bounds. Time bounds, when supplied, are inclusive.
+    /// This is a streaming, allocation-minimizing API; the processor must not retain references to the span after it returns.
+    /// </remarks>
+    /// <param name="key">The KeyId whose events should be streamed.</param>
+    /// <param name="processor">Action invoked with each chunk of matching events.</param>
+    /// <param name="from">Optional inclusive lower bound for event timestamps.</param>
+    /// <param name="to">Optional inclusive upper bound for event timestamps.</param>
+    /// <param name="chunkSize">Maximum chunk size passed to the processor (defaults to Buffers.DefaultChunkSize).</param>
     public void QueryByKeyZeroAlloc(KeyId key, Action<ReadOnlySpan<Event>> processor, DateTime? from = null, DateTime? to = null, int chunkSize = Buffers.DefaultChunkSize)
     {
         var partition = GetPartition(key);
@@ -623,6 +753,14 @@ public sealed class SpecializedEventStore
         EmitResultsChunks(results, processor, chunkSize);
     }
 
+    /// <summary>
+    /// Accumulates the values of a span of events into a dictionary keyed by KeyId.
+    /// </summary>
+    /// <param name="results">Dictionary that will be updated in-place: each event's Value is added to the entry for its Key (created if missing).</param>
+    /// <param name="events">Span of events to accumulate.</param>
+    /// <remarks>
+    /// This mutates <paramref name="results"/> and is not thread-safe.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void AccumulateResults(Dictionary<KeyId, double> results, ReadOnlySpan<Event> events)
     {
@@ -633,6 +771,12 @@ public sealed class SpecializedEventStore
         }
     }
 
+    /// <summary>
+    /// Emits the accumulated key/value pairs in fixed-size chunks to the provided processor.
+    /// </summary>
+    /// <param name="results">Dictionary of aggregated results to emit. If empty, nothing is emitted.</param>
+    /// <param name="processor">Callback invoked with each chunk as a <see cref="ReadOnlySpan{T}"/> of KeyValuePair&lt;KeyId,double&gt;.</param>
+    /// <param name="chunkSize">Maximum number of items to include in each chunk passed to <paramref name="processor"/>.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void EmitResultsChunks(Dictionary<KeyId, double> results, Action<ReadOnlySpan<KeyValuePair<KeyId, double>>> processor, int chunkSize)
     {
@@ -662,7 +806,16 @@ public sealed class SpecializedEventStore
 
     /// <summary>
     /// Zero-allocation time-filtered aggregation by key.
+    /// <summary>
+    /// Aggregates event values by key over a time window and delivers the aggregated results to the provided processor in fixed-size, zero-allocation chunks.
     /// </summary>
+    /// <remarks>
+    /// This method scans each partition for events whose timestamps fall between <paramref name="from"/> and <paramref name="to"/> (using the events' <c>Ticks</c>), accumulates the sum of values per <see cref="KeyId"/>, and then invokes <paramref name="processor"/> with the aggregated results in slices of up to <paramref name="chunkSize"/> items. The operation uses pooled buffers and zero-allocation snapshot APIs on partitions to minimize temporary allocations.
+    /// </remarks>
+    /// <param name="from">Start of the time window (inclusive lower bound) used to filter events.</param>
+    /// <param name="to">End of the time window used to filter events.</param>
+    /// <param name="processor">Callback invoked with each chunk of aggregated results as a <see cref="ReadOnlySpan{T}"/> of <see cref="KeyValuePair{KeyId,double}"/>.</param>
+    /// <param name="chunkSize">Maximum number of aggregated entries passed to <paramref name="processor"/> in a single call. Must be a positive value; defaults to <see cref="Buffers.DefaultChunkSize"/>.</param>
     public void AggregateByKeyZeroAlloc(DateTime from, DateTime to, Action<ReadOnlySpan<KeyValuePair<KeyId, double>>> processor, int chunkSize = Buffers.DefaultChunkSize)
     {
         var results = new Dictionary<KeyId, double>();

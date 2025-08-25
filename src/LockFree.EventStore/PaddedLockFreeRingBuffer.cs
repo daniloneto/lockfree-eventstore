@@ -79,7 +79,18 @@ public sealed class PaddedLockFreeRingBuffer<T>
 
     /// <summary>
     /// Attempts to enqueue multiple items in a batch operation.
+    /// <summary>
+    /// Attempts to enqueue a batch of items into the ring buffer.
     /// </summary>
+    /// <param name="items">Span of items to append to the buffer. May be empty.</param>
+    /// <returns>The number of items actually enqueued (equal to <c>items.Length</c> when non-empty, otherwise 0).</returns>
+    /// <remarks>
+    /// This is a lock-free append that atomically reserves space by advancing the tail by the batch size, writes the items into the circular buffer, and updates the approximate count.
+    /// If the incoming batch causes the tail to advance past the head by more than the buffer capacity, the oldest items are considered overwritten:
+    /// - Up to <c>batchSize</c> oldest items will be discarded.
+    /// - If an on-item-discard callback was provided to the buffer, it will be invoked for each discarded item.
+    /// - When head is successfully advanced to drop discarded items, the internal epoch is incremented to signal the overwrite.
+    /// </remarks>
     public int TryEnqueueBatch(ReadOnlySpan<T> items)
     {
         if (items.IsEmpty)
@@ -132,7 +143,11 @@ public sealed class PaddedLockFreeRingBuffer<T>
 
     /// <summary>
     /// Takes a snapshot of current items into the provided buffer.
+    /// <summary>
+    /// Copies a snapshot of up to <paramref name="destination"/>.Length items from the ring buffer into <paramref name="destination"/>.
     /// </summary>
+    /// <param name="destination">Span to receive items from the current buffer contents; only the first <c>n</c> elements are written, where <c>n</c> is the returned count.</param>
+    /// <returns>The number of items copied into <paramref name="destination"/>. This is the minimum of the buffer capacity, the current item count (tail - head), and <paramref name="destination"/>.Length.</returns>
     public int Snapshot(Span<T> destination)
     {
         var head = Volatile.Read(ref _header.Head);
@@ -181,7 +196,17 @@ public sealed class PaddedLockFreeRingBuffer<T>
 
     /// <summary>
     /// Zero-allocation enumeration using callback processing.
+    /// <summary>
+    /// Iterates the current contents of the ring buffer without allocations, applying a stateful processor to each item in order.
     /// </summary>
+    /// <param name="initialState">Initial processor state supplied to the first invocation.</param>
+    /// <param name="processor">Function invoked for each item; returns the updated state and a boolean indicating whether iteration should continue.</param>
+    /// <param name="finalState">The processor state after iteration completes (either after processing all available items or after early termination).</param>
+    /// <remarks>
+    /// The method captures head and tail atomically at the start and processes up to min(tail - head, Capacity) items starting from head (wrap-aware).
+    /// It does not modify the buffer or its head/tail pointers. Processing stops early if <paramref name="processor"/> returns Continue = false.
+    /// This method avoids allocations and is intended for zero-allocation, in-place processing of buffer contents.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void ProcessItemsZeroAlloc<TState>(TState initialState, Func<TState, T, (TState State, bool Continue)> processor, out TState finalState)
     {
@@ -276,7 +301,17 @@ public sealed class PaddedLockFreeRingBuffer<T>
 
     /// <summary>
     /// Creates a filtered view of buffer contents based on timestamp range.
+    /// <summary>
+    /// Creates a partition view containing only items whose timestamps fall within the inclusive range [fromTicks, toTicks].
     /// </summary>
+    /// <param name="fromTicks">Inclusive lower bound of the timestamp filter.</param>
+    /// <param name="toTicks">Inclusive upper bound of the timestamp filter.</param>
+    /// <param name="timestampSelector">Selector used to obtain timestamps from items.</param>
+    /// <returns>
+    /// A <see cref="PartitionView{T}"/> representing the filtered view of the buffer at a (near-)consistent point in time.
+    /// The method attempts up to 10 epoch-consistent reads to avoid copying; if consistency cannot be achieved it falls back to a current head/tail snapshot.
+    /// </returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="timestampSelector"/> is null.</exception>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public PartitionView<T> CreateViewFiltered(
         long fromTicks, 
@@ -308,6 +343,18 @@ public sealed class PaddedLockFreeRingBuffer<T>
         return CreateFilteredViewFromRange(currentHead, currentTail, fromTicks, toTicks, timestampSelector);
     }
 
+    /// <summary>
+    /// Builds a PartitionView containing the items whose timestamps (via <paramref name="timestampSelector"/>) fall within the inclusive range [<paramref name="fromTicks"/>, <paramref name="toTicks"/>]
+    /// from the logical range [<paramref name="head"/>, <paramref name="tail"/>). The returned view references the internal buffer (no copies) and may be one or two segments when the range wraps.
+    /// </summary>
+    /// <param name="head">Absolute sequence index of the first available item in the partition.</param>
+    /// <param name="tail">Absolute sequence index one past the last available item in the partition.</param>
+    /// <param name="fromTicks">Inclusive lower bound of the timestamp range to include.</param>
+    /// <param name="toTicks">Inclusive upper bound of the timestamp range to include.</param>
+    /// <param name="timestampSelector">Selector used to extract an event timestamp from each item.</param>
+    /// <returns>
+    /// A PartitionView containing only the items whose timestamps are within [fromTicks, toTicks]. If no items match, returns an empty view. The view's count is the number of matching items and the view references the buffer segments directly.
+    /// </returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private PartitionView<T> CreateFilteredViewFromRange(
         long head, 
@@ -405,7 +452,10 @@ public sealed class PaddedLockFreeRingBuffer<T>
 
     /// <summary>
     /// Convenience method that allocates an array and returns an enumerable.
+    /// <summary>
+    /// Returns a new list containing a point-in-time snapshot of up to <see cref="Capacity"/> items currently stored in the buffer.
     /// </summary>
+    /// <returns>A new <see cref="IEnumerable{T}"/> (concrete <see cref="List{T}"/>) containing the captured items; count is between 0 and <see cref="Capacity"/>.</returns>
     public IEnumerable<T> EnumerateSnapshot()
     {
         var tmp = new T[Capacity];

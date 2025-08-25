@@ -87,7 +87,10 @@ public sealed class EventStoreOptions<TEvent>
 
     /// <summary>
     /// Gets the effective total capacity.
+    /// <summary>
+    /// Gets the effective total capacity for the event store.
     /// </summary>
+    /// <returns>The total number of slots: <see cref="Capacity"/> if set; otherwise <c>CapacityPerPartition * Partitions</c>.</returns>
     public int GetTotalCapacity()
     {
         return Capacity ?? (CapacityPerPartition * Partitions);
@@ -95,7 +98,22 @@ public sealed class EventStoreOptions<TEvent>
 
     /// <summary>
     /// Validates bucket-related configuration to fail fast on invalid settings.
+    /// <summary>
+    /// Validates windowing and stats-related configuration and throws if any setting is invalid.
     /// </summary>
+    /// <remarks>
+    /// Performs fast-fail checks for bucket/window configuration and stats sampling:
+    /// - BucketCount must be > 0.
+    /// - If set, BucketWidthTicks must be > 0.
+    /// - If both WindowSizeTicks and BucketWidthTicks are set, WindowSizeTicks must be >= BucketWidthTicks and an exact multiple of BucketWidthTicks.
+    /// - StatsUpdateInterval must be > 0.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// Thrown when BucketCount &lt;= 0, when BucketWidthTicks is specified but &lt;= 0, or when StatsUpdateInterval &lt;= 0.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// Thrown when both WindowSizeTicks and BucketWidthTicks are specified but WindowSizeTicks is smaller than BucketWidthTicks or not an exact multiple of it.
+    /// </exception>
     public void Validate()
     {
         if (BucketCount <= 0)
