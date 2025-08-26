@@ -7,21 +7,11 @@ namespace LockFree.EventStore;
 /// <summary>
 /// Delegate for processing events during zero-allocation enumeration.
 /// </summary>
-/// <typeparam name="TEvent">The event type</typeparam>
-/// <typeparam name="TState">The accumulator state type</typeparam>
-/// <param name="state">The accumulator state (passed by reference for performance)</param>
-/// <param name="evt">The current event being processed</param>
-/// <param name="timestamp">The event timestamp (if available)</param>
-/// <returns>True to continue processing, false to stop early</returns>
 public delegate bool EventProcessor<TEvent, TState>(ref TState state, TEvent evt, DateTime? timestamp = null);
 
 /// <summary>
 /// Delegate for filtering events during zero-allocation enumeration.
 /// </summary>
-/// <typeparam name="TEvent">The event type</typeparam>
-/// <param name="evt">The event to test</param>
-/// <param name="timestamp">The event timestamp (if available)</param>
-/// <returns>True if the event should be processed, false to skip</returns>
 public delegate bool EventFilter<TEvent>(TEvent evt, DateTime? timestamp = null);
 
 /// <summary>
@@ -29,6 +19,138 @@ public delegate bool EventFilter<TEvent>(TEvent evt, DateTime? timestamp = null)
 /// </summary>
 public static class ZeroAllocationExtensions
 {
+    // Helper to centralize filter application and timestamp acquisition
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool PassesFilter<TEvent>(
+        EventFilter<TEvent>? filter,
+        IEventTimestampSelector<TEvent>? tsSelector,
+        TEvent evt)
+    {
+        if (filter is null)
+        {
+            return true;
+        }
+        var ts = tsSelector?.GetTimestamp(evt);
+        return filter(evt, ts);
+    }
+
+    // Time window detection helper
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool HasTimeRange(DateTime? from, DateTime? to)
+    {
+        return from.HasValue || to.HasValue;
+    }
+
+    // No-filter fast path: either whole snapshot or time-bounded snapshot.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TState ProcessNoFilterChunked<TEvent, TState>(
+        EventStore<TEvent> store,
+        TState state,
+        Func<TState, ReadOnlySpan<TEvent>, TState> chunkProcessor,
+        DateTime? from,
+        DateTime? to,
+        bool hasTime,
+        int chunkSize)
+    {
+        if (hasTime)
+        {
+            store.SnapshotTimeFilteredZeroAlloc(from, to, chunk =>
+            {
+                state = chunkProcessor(state, chunk);
+            }, chunkSize);
+        }
+        else
+        {
+            store.SnapshotZeroAlloc(chunk =>
+            {
+                state = chunkProcessor(state, chunk);
+            }, chunkSize);
+        }
+
+        return state;
+    }
+
+    // Filtered, no time bounds: let the ring buffer filter.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TState ProcessWithFilterNoTime<TEvent, TState>(
+        EventStore<TEvent> store,
+        TState state,
+        Func<TState, ReadOnlySpan<TEvent>, TState> chunkProcessor,
+        EventFilter<TEvent> filter,
+        int chunkSize)
+    {
+        store.SnapshotFilteredZeroAlloc(evt =>
+        {
+            var timestamp = store.TimestampSelector?.GetTimestamp(evt);
+            return filter(evt, timestamp);
+        }, chunk =>
+        {
+            state = chunkProcessor(state, chunk);
+        }, chunkSize);
+
+        return state;
+    }
+
+    // Filtered with time bounds: stream time-filtered chunks, then apply filter into a pooled scratch buffer.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TState ProcessWithFilterAndTime<TEvent, TState>(
+        EventStore<TEvent> store,
+        TState state,
+        Func<TState, ReadOnlySpan<TEvent>, TState> chunkProcessor,
+        EventFilter<TEvent> filter,
+        DateTime? from,
+        DateTime? to,
+        int chunkSize)
+    {
+        var pool = ArrayPool<TEvent>.Shared;
+        var scratch = pool.Rent(chunkSize);
+        try
+        {
+            store.SnapshotTimeFilteredZeroAlloc(from, to, chunk =>
+            {
+                var n = FilterChunkIntoScratch(chunk, filter, store.TimestampSelector, ref scratch, pool);
+                if (n > 0)
+                {
+                    state = chunkProcessor(state, scratch.AsSpan(0, n));
+                }
+            }, chunkSize);
+        }
+        finally
+        {
+            pool.Return(scratch, clearArray: false);
+        }
+
+        return state;
+    }
+
+    // Copies filtered events from chunk into scratch buffer, resizing from the pool if necessary.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int FilterChunkIntoScratch<TEvent>(
+        ReadOnlySpan<TEvent> chunk,
+        EventFilter<TEvent> filter,
+        IEventTimestampSelector<TEvent>? tsSelector,
+        ref TEvent[] scratch,
+        ArrayPool<TEvent> pool)
+    {
+        var n = 0;
+        for (var i = 0; i < chunk.Length; i++)
+        {
+            var evt = chunk[i];
+            if (PassesFilter(filter, tsSelector, evt))
+            {
+                if (n >= scratch.Length)
+                {
+                    var old = scratch;
+                    scratch = pool.Rent(Math.Max(old.Length * 2, n + 1));
+                    old.AsSpan(0, n).CopyTo(scratch);
+                    pool.Return(old, clearArray: false);
+                }
+                scratch[n++] = evt;
+            }
+        }
+        return n;
+    }
+
     /// <summary>
     /// Processes all events in the store using a zero-allocation callback approach.
     /// No intermediate collections are created.
@@ -43,13 +165,17 @@ public static class ZeroAllocationExtensions
         DateTime? to = null)
     {
         var state = initialState;
-        var views = store.SnapshotViews(from, to);
-          foreach (var view in views)
+        // Use unfiltered views when no time bounds are provided to avoid requiring a TimestampSelector
+        var hasTime = from.HasValue || to.HasValue;
+        var views = hasTime ? store.SnapshotViews(from, to) : store.SnapshotViews();
+        foreach (var view in views)
         {
             if (!ProcessPartitionView(view, ref state, processor, filter, store.TimestampSelector))
+            {
                 break; // Early termination requested
+            }
         }
-        
+
         return state;
     }
 
@@ -63,16 +189,16 @@ public static class ZeroAllocationExtensions
         DateTime? from = null,
         DateTime? to = null)
     {
-        return store.ProcessEvents<TEvent, long>(
-            0L,
-            (ref long count, TEvent evt, DateTime? timestamp) =>
+        bool Processor(ref long count, TEvent evt, DateTime? timestamp)
+        {
+            if (filter == null || filter(evt, timestamp))
             {
                 count++;
-                return true; // Continue processing
-            },
-            filter,
-            from,
-            to);
+            }
+            return true;
+        }
+
+        return store.ProcessEvents(0L, Processor, null, from, to);
     }
 
     /// <summary>
@@ -85,18 +211,18 @@ public static class ZeroAllocationExtensions
         DateTime? from = null,
         DateTime? to = null)
     {
-        var result = store.ProcessEvents<TEvent, (bool Found, TEvent Event)>(
-            (false, default(TEvent)!),
-            (ref (bool Found, TEvent Event) state, TEvent evt, DateTime? timestamp) =>
+        bool Processor(ref (bool Found, TEvent Event) state, TEvent evt, DateTime? timestamp)
+        {
+            if (!filter(evt, timestamp))
             {
-                state.Found = true;
-                state.Event = evt;
-                return false; // Stop on first match
-            },
-            filter,
-            from,
-            to);
-        
+                return true;
+            }
+            state.Found = true;
+            state.Event = evt;
+            return false; // Stop on first match
+        }
+
+        var result = store.ProcessEvents<TEvent, (bool Found, TEvent Event)>((false, default(TEvent)!), Processor, null, from, to);
         return result;
     }
 
@@ -112,17 +238,19 @@ public static class ZeroAllocationExtensions
         DateTime? from = null,
         DateTime? to = null)
     {
-        return store.ProcessEvents<TEvent, TAcc>(
-            seed,
-            (ref TAcc state, TEvent evt, DateTime? timestamp) =>
+        bool Processor(ref TAcc state, TEvent evt, DateTime? timestamp)
+        {
+            if (filter == null || filter(evt, timestamp))
             {
                 state = accumulator(state, evt);
-                return true; // Continue processing
-            },
-            filter,
-            from,
-            to);
-    }    /// <summary>
+            }
+            return true;
+        }
+
+        return store.ProcessEvents(seed, Processor, null, from, to);
+    }
+
+    /// <summary>
     /// Processes events in chunks without allocation using pooled buffers.
     /// More efficient than ProcessEvents for very large datasets.
     /// </summary>
@@ -137,29 +265,48 @@ public static class ZeroAllocationExtensions
         int chunkSize = Buffers.DefaultChunkSize)
     {
         var state = initialState;
-        
-        if (filter != null)
-        {
-            store.SnapshotFilteredZeroAlloc(evt =>
+        var hasTime = HasTimeRange(from, to);
+
+        return filter is null
+            ? ProcessNoFilterChunked(store, state, chunkProcessor, from, to, hasTime, chunkSize)
+            : (!hasTime
+                ? ProcessWithFilterNoTime(store, state, chunkProcessor, filter, chunkSize)
+                : ProcessWithFilterAndTime(store, state, chunkProcessor, filter, from, to, chunkSize));
+    }
+
+    /// <summary>
+    /// Sums numeric values (generic math) without allocation using chunked processing.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static TValue SumZeroAlloc<TEvent, TValue>(
+        this EventStore<TEvent> store,
+        Func<TEvent, TValue> selector,
+        EventFilter<TEvent>? filter = null,
+        DateTime? from = null,
+        DateTime? to = null)
+        where TValue : struct, INumber<TValue>
+    {
+        return store.ProcessEventsChunked(
+            TValue.Zero,
+            (sum, chunk) =>
             {
-                var timestamp = store.TimestampSelector?.GetTimestamp(evt);
-                return filter(evt, timestamp);
-            }, chunk =>
-            {
-                state = chunkProcessor(state, chunk);
-            }, chunkSize);
-        }
-        else
-        {
-            store.SnapshotZeroAlloc(chunk =>
-            {
-                state = chunkProcessor(state, chunk);
-            }, chunkSize);
-        }
-        
-        return state;
-    }    /// <summary>
-    /// Sums numeric values from events without allocation using chunked processing.
+                for (var i = 0; i < chunk.Length; i++)
+                {
+                    var evt = chunk[i];
+                    if (PassesFilter(filter, store.TimestampSelector, evt))
+                    {
+                        sum += selector(evt);
+                    }
+                }
+                return sum;
+            },
+            filter,
+            from,
+            to);
+    }
+
+    /// <summary>
+    /// Sums numeric values from events without allocation using chunked processing (double selector fast-path).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static double SumZeroAlloc<TEvent>(
@@ -169,13 +316,17 @@ public static class ZeroAllocationExtensions
         DateTime? from = null,
         DateTime? to = null)
     {
-        return store.ProcessEventsChunked<TEvent, double>(
+        return store.ProcessEventsChunked(
             0.0,
             (sum, chunk) =>
             {
-                foreach (var evt in chunk)
+                for (var i = 0; i < chunk.Length; i++)
                 {
-                    sum += selector(evt);
+                    var evt = chunk[i];
+                    if (PassesFilter(filter, store.TimestampSelector, evt))
+                    {
+                        sum += selector(evt);
+                    }
                 }
                 return sum;
             },
@@ -196,12 +347,17 @@ public static class ZeroAllocationExtensions
         DateTime? to = null)
         where TResult : struct, IComparable<TResult>
     {
-        var result = store.ProcessEventsChunked<TEvent, (bool HasValue, TResult Min)>(
-            (false, default(TResult)),
+        var (hasValue, min) = store.ProcessEventsChunked<TEvent, (bool HasValue, TResult Min)>(
+            (false, default),
             (state, chunk) =>
             {
-                foreach (var evt in chunk)
+                for (var i = 0; i < chunk.Length; i++)
                 {
+                    var evt = chunk[i];
+                    if (!PassesFilter(filter, store.TimestampSelector, evt))
+                    {
+                        continue;
+                    }
                     var value = selector(evt);
                     if (!state.HasValue || value.CompareTo(state.Min) < 0)
                     {
@@ -213,8 +369,8 @@ public static class ZeroAllocationExtensions
             filter,
             from,
             to);
-        
-        return result.HasValue ? result.Min : null;
+
+        return hasValue ? min : null;
     }
 
     /// <summary>
@@ -229,12 +385,17 @@ public static class ZeroAllocationExtensions
         DateTime? to = null)
         where TResult : struct, IComparable<TResult>
     {
-        var result = store.ProcessEventsChunked<TEvent, (bool HasValue, TResult Max)>(
-            (false, default(TResult)),
+        var (hasValue, max) = store.ProcessEventsChunked<TEvent, (bool HasValue, TResult Max)>(
+            (false, default),
             (state, chunk) =>
             {
-                foreach (var evt in chunk)
+                for (var i = 0; i < chunk.Length; i++)
                 {
+                    var evt = chunk[i];
+                    if (!PassesFilter(filter, store.TimestampSelector, evt))
+                    {
+                        continue;
+                    }
                     var value = selector(evt);
                     if (!state.HasValue || value.CompareTo(state.Max) > 0)
                     {
@@ -246,10 +407,47 @@ public static class ZeroAllocationExtensions
             filter,
             from,
             to);
-        
-        return result.HasValue ? result.Max : null;
-    }    /// <summary>
-    /// Calculates average of numeric values from events without allocation.
+
+        return hasValue ? max : null;
+    }
+
+    /// <summary>
+    /// Calculates average of numeric values from events without allocation (generic math).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double AverageZeroAlloc<TEvent, TValue>(
+        this EventStore<TEvent> store,
+        Func<TEvent, TValue> selector,
+        EventFilter<TEvent>? filter = null,
+        DateTime? from = null,
+        DateTime? to = null)
+        where TValue : struct, INumber<TValue>
+    {
+        var (sum, count) = store.ProcessEventsChunked<TEvent, (TValue Sum, long Count)>(
+            (TValue.Zero, 0L),
+            (state, chunk) =>
+            {
+                for (var i = 0; i < chunk.Length; i++)
+                {
+                    var evt = chunk[i];
+                    if (!PassesFilter(filter, store.TimestampSelector, evt))
+                    {
+                        continue;
+                    }
+                    state.Sum += selector(evt);
+                    state.Count++;
+                }
+                return state;
+            },
+            filter,
+            from,
+            to);
+
+        return count > 0 ? double.CreateChecked(sum) / count : 0.0;
+    }
+
+    /// <summary>
+    /// Calculates average of numeric values from events without allocation (double selector fast-path).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static double AverageZeroAlloc<TEvent>(
@@ -259,12 +457,17 @@ public static class ZeroAllocationExtensions
         DateTime? from = null,
         DateTime? to = null)
     {
-        var result = store.ProcessEventsChunked<TEvent, (double Sum, long Count)>(
+        var (sum, count) = store.ProcessEventsChunked<TEvent, (double Sum, long Count)>(
             (0.0, 0L),
             (state, chunk) =>
             {
-                foreach (var evt in chunk)
+                for (var i = 0; i < chunk.Length; i++)
                 {
+                    var evt = chunk[i];
+                    if (!PassesFilter(filter, store.TimestampSelector, evt))
+                    {
+                        continue;
+                    }
                     state.Sum += selector(evt);
                     state.Count++;
                 }
@@ -273,8 +476,8 @@ public static class ZeroAllocationExtensions
             filter,
             from,
             to);
-        
-        return result.Count > 0 ? result.Sum / result.Count : 0.0;
+
+        return count > 0 ? sum / count : 0.0;
     }
 
     /// <summary>
@@ -294,7 +497,7 @@ public static class ZeroAllocationExtensions
         var groups = new Dictionary<TKey, List<TEvent>>();
 
         // Process events in chunks and accumulate into groups
-        store.ProcessEventsChunked<TEvent, Dictionary<TKey, List<TEvent>>>(
+        groups = store.ProcessEventsChunked(
             groups,
             (currentGroups, chunk) => AccumulateGroups(currentGroups, chunk, keySelector),
             filter,
@@ -313,16 +516,18 @@ public static class ZeroAllocationExtensions
         Func<TEvent, TKey> keySelector)
         where TKey : notnull
     {
-        for (int i = 0; i < chunk.Length; i++)
+        for (var i = 0; i < chunk.Length; i++)
         {
             var evt = chunk[i];
             var key = keySelector(evt);
-            if (!currentGroups.TryGetValue(key, out var list))
+            if (currentGroups.TryGetValue(key, out var existing))
             {
-                list = new List<TEvent>();
-                currentGroups[key] = list;
+                existing.Add(evt);
             }
-            list.Add(evt);
+            else
+            {
+                currentGroups[key] = [evt];
+            }
         }
         return currentGroups;
     }
@@ -334,9 +539,12 @@ public static class ZeroAllocationExtensions
         int chunkSize)
         where TKey : notnull
     {
-        if (groups.Count == 0) return;
+        if (groups.Count == 0)
+        {
+            return;
+        }
 
-        Buffers.WithRentedBuffer<KeyValuePair<TKey, List<TEvent>>>(chunkSize, buffer =>
+        Buffers.WithRentedBuffer(chunkSize, buffer =>
         {
             var count = 0;
             foreach (var kvp in groups)
@@ -366,20 +574,27 @@ public static class ZeroAllocationExtensions
         EventFilter<TEvent>? filter,
         IEventTimestampSelector<TEvent>? timestampSelector)
     {
-        if (view.IsEmpty) return true;
+        if (view.IsEmpty)
+        {
+            return true;
+        }
 
         foreach (var evt in view)
         {
-            DateTime? timestamp = timestampSelector?.GetTimestamp(evt);
-            
+            var timestamp = timestampSelector?.GetTimestamp(evt);
+
             // Apply filter if provided
             if (filter != null && !filter(evt, timestamp))
+            {
                 continue;
-            
+            }
+
             // Process the event
             if (!processor(ref state, evt, timestamp))
+            {
                 return false; // Early termination requested
+            }
         }
-          return true; // Continue processing
+        return true; // Continue processing
     }
 }

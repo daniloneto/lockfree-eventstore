@@ -58,8 +58,8 @@ public class PerformanceHelpersTests
     public void BoundsCheck_Throws_When_Out_Of_Range()
     {
         PerformanceHelpers.BoundsCheck(0, 1); // ok
-        Assert.Throws<IndexOutOfRangeException>(() => PerformanceHelpers.BoundsCheck(1, 1));
-        Assert.Throws<IndexOutOfRangeException>(() => PerformanceHelpers.BoundsCheck(unchecked((uint)-1), 1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => PerformanceHelpers.BoundsCheck(1, 1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => PerformanceHelpers.BoundsCheck(unchecked((uint)-1), 1));
     }
 
     [Fact]

@@ -1,10 +1,12 @@
 # LockFree.EventStore
 [![CI](https://github.com/daniloneto/lockfree-eventstore/actions/workflows/ci.yml/badge.svg)](https://github.com/daniloneto/lockfree-eventstore/actions)
-[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.Event.Store)
+[![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.EventStore)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=daniloneto_lockfree-eventstore&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=daniloneto_lockfree-eventstore)
 **An in-memory event store, running as a service, to synchronize and validate operations across multiple instances with high concurrency and no locks.**
 
 ---
+
+> Important: Prefer zero-allocation APIs introduced in vNext. Legacy Query-based APIs are kept for compatibility and marked as [Obsolete], delegating to zero-alloc implementations.
 
 ## 🚀 Get started in 3 steps
 
@@ -98,28 +100,32 @@ var total = store.Aggregate(() => 0m, (acc, e) => acc + e.Valor,
 ## New Constructors
 ```csharp
 // Explicit capacity
-var store = new EventStore<Pedido>(capacidade: 100_000);
+var store = new EventStore<Pedido>(capacity: 100_000);
 
 // Capacity and partitions
-var store = new EventStore<Pedido>(capacidade: 50_000, particoes: 8);
+var store = new EventStore<Pedido>(capacity: 50_000, partitions: 8);
 
 // Advanced configuration
 var store = new EventStore<Pedido>(new EventStoreOptions<Pedido>
 {
-    Capacidade = 100_000,
-    Particoes = 16,
+    Capacity = 100_000,
+    Partitions = 16,
     OnEventDiscarded = evt => Logger.LogTrace("Event discarded: {Event}", evt),
     OnCapacityReached = () => Metrics.IncrementCounter("eventstore.capacity_reached"),
-    TimestampSelector = new PedidoTimestampSelector()
+    TimestampSelector = new PedidoTimestampSelector(),
+    // RFC 002: disable window tracking for pure append/snapshot workloads
+    EnableWindowTracking = false
 });
 
 // Fluent API
-var store = EventStore.For<Pedido>()
+var store = new EventStoreBuilder<Pedido>()
     .WithCapacity(100_000)
     .WithPartitions(8)
     .OnDiscarded(evt => Log(evt))
     .OnCapacityReached(() => NotifyAdmin())
     .WithTimestampSelector(new PedidoTimestampSelector())
+    // RFC 002: opt-out when window queries are not used
+    .WithEnableWindowTracking(false)
     .Create();
 ```
 
@@ -155,6 +161,8 @@ var filteredSum = store.Sum(
     to: fim
 );
 ```
+
+Note: Time-filtered queries require `EnableWindowTracking = true`. When disabled, a clear InvalidOperationException is thrown: "Window tracking is disabled. EnableWindowTracking must be true to use window queries."
 
 ## Snapshots with Filters
 ```csharp
@@ -250,14 +258,6 @@ Designed for high concurrency and low latency. Global order across partitions is
 **Conclusions:**
 1. Value types are significantly faster than reference types for reads and writes.
 2. SoA improves cache locality and reduces memory pressure.
-3. For high throughput, the `EventStoreV2` implementation is recommended.
-
-```csharp
-// Using EventStoreV2 with value types
-var store = new EventStoreV2(capacidade: 1_000_000, particoes: 16);
-store.Add("sensor1", 25.5, DateTime.UtcNow.Ticks);
-double media = store.Average("sensor1");
-```
 
 ## Limitations
 - Global order is only approximate across partitions

@@ -10,7 +10,6 @@ namespace LockFree.EventStore;
 public sealed class LockFreeRingBuffer<T>
 {
     private readonly T[] _buffer;
-    private readonly int _capacity;
     private long _head;
     private long _tail;
     private readonly Action<T>? _onItemDiscarded;
@@ -23,19 +22,19 @@ public sealed class LockFreeRingBuffer<T>
     public LockFreeRingBuffer(int capacity, Action<T>? onItemDiscarded = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
-        _capacity = capacity;
+        Capacity = capacity;
         _buffer = new T[capacity];
         _onItemDiscarded = onItemDiscarded;
         _epoch = 0;
     }    /// <summary>
-    /// Total capacity.
-    /// </summary>
-    public int Capacity => _capacity;
+         /// Total capacity.
+         /// </summary>
+    public int Capacity { get; }
 
     /// <summary>
     /// Approximate count of items currently in the buffer.
     /// </summary>
-    public long CountApprox => Math.Max(0, Math.Min(_capacity, Volatile.Read(ref _tail) - Volatile.Read(ref _head)));
+    public long CountApprox => Math.Max(0, Math.Min(Capacity, Volatile.Read(ref _tail) - Volatile.Read(ref _head)));
 
     /// <summary>
     /// Whether the buffer is empty (approximate).
@@ -45,21 +44,21 @@ public sealed class LockFreeRingBuffer<T>
     /// <summary>
     /// Whether the buffer is at full capacity (approximate).
     /// </summary>
-    public bool IsFull => CountApprox >= _capacity;    /// <summary>
+    public bool IsFull => CountApprox >= Capacity;    /// <summary>
     /// Enqueues a single item, overwriting the oldest if necessary.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryEnqueue(T item)
     {
         var tail = Interlocked.Increment(ref _tail);
-        var index = (int)((tail - 1) % _capacity);
+        var index = (int)((tail - 1) % Capacity);
         _buffer[index] = item;
         AdvanceHeadTo(tail);
         
         // Update epoch sparingly - only when tail advances significantly
         if ((tail & 0xFF) == 0) // Every 256 items
         {
-            Interlocked.Increment(ref _epoch);
+            _ = Interlocked.Increment(ref _epoch);
         }
         
         return true;
@@ -72,7 +71,7 @@ public sealed class LockFreeRingBuffer<T>
         int written = 0;
         foreach (var item in batch)
         {
-            TryEnqueue(item);
+            _ = TryEnqueue(item);
             written++;
         }
         return written;
@@ -85,8 +84,11 @@ public sealed class LockFreeRingBuffer<T>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int TryEnqueueBatch(ReadOnlySpan<T> batch)
     {
-        if (batch.IsEmpty) return 0;
-        
+        if (batch.IsEmpty)
+        {
+            return 0;
+        }
+
         // Reserve space for the entire batch atomically
         var endTail = Interlocked.Add(ref _tail, batch.Length);
         var startPosition = endTail - batch.Length;
@@ -95,7 +97,7 @@ public sealed class LockFreeRingBuffer<T>
         for (int i = 0; i < batch.Length; i++)
         {
             var position = startPosition + i;
-            _buffer[position % _capacity] = batch[i];
+            _buffer[position % Capacity] = batch[i];
         }
         
         // Advance head to maintain ring invariants (and invoke discard callbacks for all overwritten)
@@ -104,7 +106,7 @@ public sealed class LockFreeRingBuffer<T>
         // Update epoch once for the batch
         if ((endTail & 0xFF) == 0 || ((endTail - batch.Length) & 0xFF) > (endTail & 0xFF))
         {
-            Interlocked.Increment(ref _epoch);
+            _ = Interlocked.Increment(ref _epoch);
         }
         
         return batch.Length;
@@ -113,10 +115,12 @@ public sealed class LockFreeRingBuffer<T>
         while (true)
         {
             var head = Volatile.Read(ref _head);
-            var desiredHead = tail - _capacity;
+            var desiredHead = tail - Capacity;
             if (desiredHead <= head)
+            {
                 break;
-            
+            }
+
             // Try to advance head to the desired position in one step
             if (Interlocked.CompareExchange(ref _head, desiredHead, head) == head)
             {
@@ -125,7 +129,7 @@ public sealed class LockFreeRingBuffer<T>
                 {
                     for (long h = head; h < desiredHead; h++)
                     {
-                        var idx = (int)(h % _capacity);
+                        var idx = (int)(h % Capacity);
                         var discardedItem = _buffer[idx];
                         _onItemDiscarded(discardedItem);
                     }
@@ -148,7 +152,7 @@ public sealed class LockFreeRingBuffer<T>
         {
             for (long i = head; i < tail; i++)
             {
-                _buffer[i % _capacity] = default(T)!;
+                _buffer[i % Capacity] = default(T)!;
             }
         }
         
@@ -164,14 +168,17 @@ public sealed class LockFreeRingBuffer<T>
     {
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
-        var length = (int)Math.Min(Math.Min(tail - head, _capacity), destination.Length);
+        var length = (int)Math.Min(Math.Min(tail - head, Capacity), destination.Length);
         
-        if (length <= 0) return 0;
-        
-        var startIndex = (int)(head % _capacity);
+        if (length <= 0)
+        {
+            return 0;
+        }
+
+        var startIndex = (int)(head % Capacity);
         
         // Check if we need to handle wrap-around
-        if (startIndex + length <= _capacity)
+        if (startIndex + length <= Capacity)
         {
             // Single segment copy - can use fast span copy
             var source = _buffer.AsSpan(startIndex, length);
@@ -180,7 +187,7 @@ public sealed class LockFreeRingBuffer<T>
         else
         {
             // Two-segment copy for wrap-around
-            var firstSegmentLength = _capacity - startIndex;
+            var firstSegmentLength = Capacity - startIndex;
             var secondSegmentLength = length - firstSegmentLength;
             
             var firstSource = _buffer.AsSpan(startIndex, firstSegmentLength);
@@ -196,11 +203,14 @@ public sealed class LockFreeRingBuffer<T>
     /// </summary>
     public IEnumerable<T> EnumerateSnapshot()
     {
-        var tmp = new T[_capacity];
+        var tmp = new T[Capacity];
         var len = Snapshot(tmp);
         var results = new List<T>(len);
         for (int i = 0; i < len; i++)
+        {
             results.Add(tmp[i]);
+        }
+
         return results;
     }
 
@@ -222,8 +232,10 @@ public sealed class LockFreeRingBuffer<T>
             
             // Check if epoch changed during read - if so, retry
             if (startEpoch != endEpoch)
+            {
                 continue;
-            
+            }
+
             return CreateViewFromRange(head, tail, timestampSelector);
         }
         
@@ -254,8 +266,10 @@ public sealed class LockFreeRingBuffer<T>
             var endEpoch = Volatile.Read(ref _epoch);
             
             if (startEpoch != endEpoch)
+            {
                 continue;
-            
+            }
+
             return CreateFilteredViewFromRange(head, tail, fromTicks, toTicks, timestampSelector);
         }
         
@@ -268,7 +282,7 @@ public sealed class LockFreeRingBuffer<T>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private PartitionView<T> CreateViewFromRange(long head, long tail, IEventTimestampSelector<T>? timestampSelector)
     {
-        var count = (int)Math.Min(Math.Min(tail - head, _capacity), int.MaxValue);
+        var count = (int)Math.Min(Math.Min(tail - head, Capacity), int.MaxValue);
         if (count <= 0)
         {
             return new PartitionView<T>(
@@ -277,8 +291,8 @@ public sealed class LockFreeRingBuffer<T>
                 0, 0, 0);
         }
         
-        var startIndex = (int)(head % _capacity);
-        var endIndex = (int)((head + count - 1) % _capacity);
+        var startIndex = (int)(head % Capacity);
+        var endIndex = (int)((head + count - 1) % Capacity);
         
         long fromTicks = 0, toTicks = 0;
         if (timestampSelector != null && count > 0)
@@ -290,7 +304,7 @@ public sealed class LockFreeRingBuffer<T>
         }
         
         // Check if we need to wrap around
-        if (startIndex + count <= _capacity)
+        if (startIndex + count <= Capacity)
         {
             // Single segment case
             var segment = _buffer.AsMemory(startIndex, count);
@@ -299,7 +313,7 @@ public sealed class LockFreeRingBuffer<T>
         else
         {
             // Wrap-around case: two segments
-            var firstSegmentLength = _capacity - startIndex;
+            var firstSegmentLength = Capacity - startIndex;
             var secondSegmentLength = count - firstSegmentLength;
             
             var segment1 = _buffer.AsMemory(startIndex, firstSegmentLength);
@@ -317,7 +331,7 @@ public sealed class LockFreeRingBuffer<T>
         long toTicks, 
         IEventTimestampSelector<T> timestampSelector)
     {
-        var totalCount = (int)Math.Min(Math.Min(tail - head, _capacity), int.MaxValue);
+        var totalCount = (int)Math.Min(Math.Min(tail - head, Capacity), int.MaxValue);
         if (totalCount <= 0)
         {
             return new PartitionView<T>(
@@ -332,7 +346,7 @@ public sealed class LockFreeRingBuffer<T>
         
         for (int i = 0; i < totalCount; i++)
         {
-            var index = (int)((head + i) % _capacity);
+            var index = (int)((head + i) % Capacity);
             var item = _buffer[index];            if (timestampSelector != null)
             {
                 var timestamp = timestampSelector.GetTimestamp(item);
@@ -342,7 +356,10 @@ public sealed class LockFreeRingBuffer<T>
                 if (ticks >= fromTicks && ticks <= toTicks)
                 {
                     if (validStart == -1)
+                    {
                         validStart = i;
+                    }
+
                     validEnd = i;
                     validCount++;
                 }
@@ -358,8 +375,8 @@ public sealed class LockFreeRingBuffer<T>
         }
         
         // Create view for the valid range
-        var actualStartIndex = (int)((head + validStart) % _capacity);
-        var actualEndIndex = (int)((head + validEnd) % _capacity);
+        var actualStartIndex = (int)((head + validStart) % Capacity);
+        var actualEndIndex = (int)((head + validEnd) % Capacity);
         
         if (actualStartIndex <= actualEndIndex)
         {
@@ -371,7 +388,7 @@ public sealed class LockFreeRingBuffer<T>
         else
         {
             // Wrap-around case
-            var firstSegmentLength = _capacity - actualStartIndex;
+            var firstSegmentLength = Capacity - actualStartIndex;
             var secondSegmentLength = actualEndIndex + 1;
             
             var segment1 = _buffer.AsMemory(actualStartIndex, firstSegmentLength);
@@ -395,11 +412,11 @@ public sealed class LockFreeRingBuffer<T>
     {
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
-        var count = Math.Min(tail - head, _capacity);
+        var count = Math.Min(tail - head, Capacity);
         
         for (long i = 0; i < count; i++)
         {
-            var index = (head + i) % _capacity;
+            var index = (head + i) % Capacity;
             var item = _buffer[index];            if (timestampSelector != null)
             {
                 var timestamp = timestampSelector.GetTimestamp(item);
@@ -431,18 +448,21 @@ public sealed class LockFreeRingBuffer<T>
         WindowAdvanceCallback<T, TState> removeCallback,
         ref int windowHeadIndex)
     {
-        if (timestampSelector == null) return;
-        
+        if (timestampSelector == null)
+        {
+            return;
+        }
+
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
-        var count = Math.Min(tail - head, _capacity);
+        var count = Math.Min(tail - head, Capacity);
         
         // Find new window head position
         var newWindowHead = windowHeadIndex;
         
         for (long i = windowHeadIndex; i < count; i++)
         {
-            var index = (head + i) % _capacity;
+            var index = (head + i) % Capacity;
             var item = _buffer[index];
             var timestamp = timestampSelector.GetTimestamp(item);
             
@@ -465,7 +485,7 @@ public sealed class LockFreeRingBuffer<T>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void SnapshotZeroAlloc<TBuffer>(Action<ReadOnlySpan<T>> processor, ArrayPool<T> pool, int chunkSize = Buffers.DefaultChunkSize)
     {
-        var buffer = pool.Rent(Math.Min(chunkSize, _capacity));
+        var buffer = pool.Rent(Math.Min(chunkSize, Capacity));
         try
         {
             var len = Snapshot(buffer);
@@ -491,19 +511,21 @@ public sealed class LockFreeRingBuffer<T>
     {
         var head = Volatile.Read(ref _head);
         var tail = Volatile.Read(ref _tail);
-        var count = Math.Min(tail - head, _capacity);
+        var count = Math.Min(tail - head, Capacity);
         
         var state = initialState;
         for (long i = 0; i < count; i++)
         {
-            var index = (head + i) % _capacity;
+            var index = (head + i) % Capacity;
             var item = _buffer[index];
             
             var result = processor(state, item);
             state = result.State;
             
             if (!result.Continue)
+            {
                 break; // Early termination
+            }
         }
         
         finalState = state;

@@ -7,10 +7,10 @@ namespace LockFree.EventStore;
 /// Represents the result of a window aggregation operation.
 /// </summary>
 public readonly record struct WindowAggregateResult(
-    long Count, 
-    double Sum, 
-    double Min, 
-    double Max, 
+    long Count,
+    double Sum,
+    double Min,
+    double Max,
     double Avg);
 
 /// <summary>
@@ -19,7 +19,7 @@ public readonly record struct WindowAggregateResult(
 internal struct WindowAggregateState
 {
     public long Count;
-    public double Sum; 
+    public double Sum;
     public double Min;
     public double Max;
 
@@ -37,8 +37,14 @@ internal struct WindowAggregateState
             }
             else
             {
-                if (other.Min < Min) Min = other.Min;
-                if (other.Max > Max) Max = other.Max;
+                if (other.Min < Min)
+                {
+                    Min = other.Min;
+                }
+                if (other.Max > Max)
+                {
+                    Max = other.Max;
+                }
             }
         }
     }
@@ -67,61 +73,71 @@ internal struct SumAggregateState<TResult>
 /// <summary>
 /// Internal state for tracking removed items during window advancement.
 /// </summary>
-internal struct WindowRemoveState
+[method: MethodImpl(MethodImplOptions.AggressiveInlining)]
+internal struct WindowRemoveState(long removedCount)
 {
-    public long RemovedCount;
-    
-    // Constructor to suppress warning about never assigned field
-    public WindowRemoveState(long removedCount = 0)
+    public long RemovedCount = removedCount;
+}
+
+/// <summary>
+/// Per-partition bucket used for O(1) evict/apply window aggregations.
+/// </summary>
+internal struct AggregateBucket
+{
+    public long StartTicks;
+    public int Count;
+    public double Sum;
+    public double Min;
+    public double Max;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Reset(long bucketStart)
     {
-        RemovedCount = removedCount;
+        StartTicks = bucketStart;
+        Count = 0;
+        Sum = 0.0;
+        Min = double.MaxValue;
+        Max = double.MinValue;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Add(double value)
+    {
+        Count++;
+        Sum += value;
+        if (value < Min)
+        {
+            Min = value;
+        }
+        if (value > Max)
+        {
+            Max = value;
+        }
     }
 }
 
 /// <summary>
-/// Internal state for incremental window aggregation per partition.
-/// Maintains sliding window boundaries and aggregate values.
+/// Internal state for incremental window aggregation per partition, with bucket ring.
 /// </summary>
 internal struct PartitionWindowState
 {
-    /// <summary>
-    /// Lower bound (inclusive) of the current window in ticks.
-    /// </summary>
     public long WindowStartTicks;
-    
-    /// <summary>
-    /// Upper bound of the current window in ticks.
-    /// </summary>
     public long WindowEndTicks;
-    
-    /// <summary>
-    /// Current count of events in the window.
-    /// </summary>
+
+    // Aggregated state for current window (sum of buckets within window)
     public long Count;
-    
-    /// <summary>
-    /// Sum of values in the current window.
-    /// </summary>
     public double Sum;
-    
-    /// <summary>
-    /// Minimum value in the current window.
-    /// </summary>
     public double Min;
-    
-    /// <summary>
-    /// Maximum value in the current window.
-    /// </summary>
     public double Max;
-    
-    /// <summary>
-    /// Logical pointer to the start position of the current window in the ring buffer.
-    /// </summary>
+
+    // Logical pointer to the start position of the current window in the ring buffer (events). Kept for compatibility.
     public int WindowHeadIndex;
 
-    /// <summary>
-    /// Resets the window state to initial values.
-    /// </summary>
+    // Bucket ring for O(1) evict/apply
+    public AggregateBucket[]? Buckets;
+    public int BucketHead; // index of the bucket that contains WindowStartTicks (floor-aligned to BucketWidthTicks)
+    public long BucketWidthTicks;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Reset()
     {
@@ -132,33 +148,33 @@ internal struct PartitionWindowState
         Min = double.MaxValue;
         Max = double.MinValue;
         WindowHeadIndex = 0;
+        Buckets = null;
+        BucketHead = 0;
+        BucketWidthTicks = 0;
     }
 
-    /// <summary>
-    /// Updates the aggregate with a new value.
-    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void AddValue(double value)
     {
         Count++;
         Sum += value;
-        if (value < Min) Min = value;
-        if (value > Max) Max = value;
+        if (value < Min)
+        {
+            Min = value;
+        }
+        if (value > Max)
+        {
+            Max = value;
+        }
     }
 
-    /// <summary>
-    /// Removes a value from the aggregate.
-    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void RemoveValue(double value)
     {
         Count--;
         Sum -= value;
-        // Note: Min/Max recalculation will be handled during window advance
+        // Min/Max recomputation is handled when buckets roll
     }
 
-    /// <summary>
-    /// Gets the average value in the window.
-    /// </summary>
     public readonly double Average => Count > 0 ? Sum / Count : 0.0;
 }
