@@ -114,7 +114,7 @@ await app.RunAsync();
 
 namespace GatewayClient
 {
-    internal class GatewayOrderCreated
+    internal sealed class GatewayOrderCreated
     {
         public string Id { get; set; } = string.Empty;
         public int Valor { get; set; }
