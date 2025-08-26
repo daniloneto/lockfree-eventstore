@@ -2,12 +2,10 @@
 [![CI](https://github.com/daniloneto/lockfree-eventstore/actions/workflows/ci.yml/badge.svg)](https://github.com/daniloneto/lockfree-eventstore/actions)
 [![NuGet](https://img.shields.io/nuget/v/LockFree.EventStore.svg)](https://www.nuget.org/packages/LockFree.EventStore)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=daniloneto_lockfree-eventstore&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=daniloneto_lockfree-eventstore)
+
 **An in-memory event store, running as a service, to synchronize and validate operations across multiple instances with high concurrency and no locks.**
 
 ---
-
-> Important: Prefer zero-allocation APIs introduced in vNext. Legacy Query-based APIs are kept for compatibility and marked as [Obsolete], delegating to zero-alloc implementations.
-
 ## 🚀 Get started in 3 steps
 
 ### 1. Run the server
