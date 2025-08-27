@@ -19,7 +19,8 @@ public readonly struct EventTimestampSelector : IEventTimestampSelector<Event>
     /// <returns>The timestamp of the event.</returns>
     public DateTime GetTimestamp(Event e)
     {
-        return new(e.TimestampTicks);
+        // Explicitly specify the kind to avoid defaulting to Unspecified implicitly
+        return new DateTime(e.TimestampTicks, DateTimeKind.Unspecified);
     }
 
     /// <summary>

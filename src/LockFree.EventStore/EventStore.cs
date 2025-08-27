@@ -1268,6 +1268,23 @@ public sealed class EventStore<TEvent>
     }
 
     /// <summary>
+    /// Finds minimum value using a selector without allocations (double selector fast-path overload).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public double? MinZeroAlloc(Func<TEvent, double> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
+    {
+        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
+
+        if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && TimestampSelector is not null && _options.WindowSizeTicks.HasValue
+            && CanUseBucketFastPath(from.Value, to.Value))
+        {
+            var r = AggregateFromBuckets(from.Value, to.Value);
+            return r.Count > 0 ? r.Min : null;
+        }
+        return ZeroAllocationExtensions.MinZeroAlloc(this, selector, filter, from, to);
+    }
+
+    /// <summary>
     /// Performs window aggregation using a zero-allocation pipeline and a double selector.
     /// </summary>
     /// <param name="selector">Projects a double value from an event.</param>
@@ -1301,13 +1318,11 @@ public sealed class EventStore<TEvent>
     private bool TryBucketAggregateFastPath(EventFilter<TEvent>? filter, DateTime? from, DateTime? to, out WindowAggregateResult result)
     {
         result = default;
-        if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && TimestampSelector is not null && _options.WindowSizeTicks.HasValue)
+        if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && TimestampSelector is not null && _options.WindowSizeTicks.HasValue
+            && CanUseBucketFastPath(from.Value, to.Value))
         {
-            if (CanUseBucketFastPath(from.Value, to.Value))
-            {
-                result = AggregateFromBuckets(from.Value, to.Value);
-                return true;
-            }
+            result = AggregateFromBuckets(from.Value, to.Value);
+            return true;
         }
         return false;
     }
@@ -1360,13 +1375,11 @@ public sealed class EventStore<TEvent>
     {
         EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
 
-        if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && TimestampSelector is not null && _options.WindowSizeTicks.HasValue)
+        if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && TimestampSelector is not null && _options.WindowSizeTicks.HasValue
+            && CanUseBucketFastPath(from.Value, to.Value))
         {
-            if (CanUseBucketFastPath(from.Value, to.Value))
-            {
-                var r = AggregateFromBuckets(from.Value, to.Value);
-                return r.Count > 0 ? r.Max : null;
-            }
+            var r = AggregateFromBuckets(from.Value, to.Value);
+            return r.Count > 0 ? r.Max : null;
         }
         return ZeroAllocationExtensions.MaxZeroAlloc(this, selector, filter, from, to);
     }
@@ -1390,13 +1403,11 @@ public sealed class EventStore<TEvent>
     {
         EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
 
-        if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && TimestampSelector is not null && _options.WindowSizeTicks.HasValue)
+        if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && TimestampSelector is not null && _options.WindowSizeTicks.HasValue
+            && CanUseBucketFastPath(from.Value, to.Value))
         {
-            if (CanUseBucketFastPath(from.Value, to.Value))
-            {
-                var r = AggregateFromBuckets(from.Value, to.Value);
-                return r.Sum;
-            }
+            var r = AggregateFromBuckets(from.Value, to.Value);
+            return r.Sum;
         }
         return ZeroAllocationExtensions.SumZeroAlloc(this, selector, filter, from, to);
     }
@@ -1420,13 +1431,11 @@ public sealed class EventStore<TEvent>
     {
         EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
 
-        if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && TimestampSelector is not null && _options.WindowSizeTicks.HasValue)
+        if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && TimestampSelector is not null && _options.WindowSizeTicks.HasValue
+            && CanUseBucketFastPath(from.Value, to.Value))
         {
-            if (CanUseBucketFastPath(from.Value, to.Value))
-            {
-                var r = AggregateFromBuckets(from.Value, to.Value);
-                return r.Count > 0 ? r.Sum / r.Count : 0.0;
-            }
+            var r = AggregateFromBuckets(from.Value, to.Value);
+            return r.Count > 0 ? r.Sum / r.Count : 0.0;
         }
         return ZeroAllocationExtensions.AverageZeroAlloc(this, selector, filter, from, to);
     }
@@ -1881,24 +1890,5 @@ public sealed class EventStore<TEvent>
             }
         }
         return true;
-    }
-
-    /// <summary>
-    /// Finds minimum value using a selector without allocations (double selector fast-path overload).
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public double? MinZeroAlloc(Func<TEvent, double> selector, EventFilter<TEvent>? filter = null, DateTime? from = null, DateTime? to = null)
-    {
-        EnsureWindowTrackingEnabledIfTimeFiltered(from, to);
-
-        if (filter is null && from.HasValue && to.HasValue && _options.ValueSelector is not null && TimestampSelector is not null && _options.WindowSizeTicks.HasValue)
-        {
-            if (CanUseBucketFastPath(from.Value, to.Value))
-            {
-                var r = AggregateFromBuckets(from.Value, to.Value);
-                return r.Count > 0 ? r.Min : null;
-            }
-        }
-        return ZeroAllocationExtensions.MinZeroAlloc(this, selector, filter, from, to);
     }
 }
