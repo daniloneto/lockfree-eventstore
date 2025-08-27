@@ -100,13 +100,12 @@ public sealed class EventStoreOptions<TEvent>
     {
         if (BucketCount <= 0)
         {
-            // Use ArgumentOutOfRangeException with null paramName to avoid referencing non-parameters
-            throw new ArgumentOutOfRangeException(null, "BucketCount must be greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(BucketCount), "BucketCount must be greater than zero.");
         }
 
         if (BucketWidthTicks.HasValue && BucketWidthTicks.Value <= 0)
         {
-            throw new ArgumentOutOfRangeException(null, "BucketWidthTicks must be greater than zero when specified.");
+            throw new ArgumentOutOfRangeException(nameof(BucketWidthTicks), "BucketWidthTicks must be greater than zero when specified.");
         }
 
         if (WindowSizeTicks.HasValue && BucketWidthTicks.HasValue)
@@ -115,17 +114,17 @@ public sealed class EventStoreOptions<TEvent>
             var width = BucketWidthTicks.Value;
             if (window < width)
             {
-                throw new ArgumentException("WindowSizeTicks must be greater than or equal to BucketWidthTicks when both are specified.");
+                throw new ArgumentException("WindowSizeTicks must be greater than or equal to BucketWidthTicks when both are specified.", nameof(WindowSizeTicks));
             }
             if (window % width != 0)
             {
-                throw new ArgumentException("WindowSizeTicks must be an exact multiple of BucketWidthTicks when both are specified.");
+                throw new ArgumentException("WindowSizeTicks must be an exact multiple of BucketWidthTicks when both are specified.", nameof(WindowSizeTicks));
             }
         }
 
         if (StatsUpdateInterval <= 0)
         {
-            throw new ArgumentOutOfRangeException(null, "StatsUpdateInterval must be greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(StatsUpdateInterval), "StatsUpdateInterval must be greater than zero.");
         }
     }
 }
