@@ -4,8 +4,15 @@ using LockFree.EventStore;
 
 namespace MetricsDashboard;
 
-internal static class Program
+/// <summary>
+/// Entry point and HTTP endpoint setup for the MetricsDashboard sample.
+/// Made public for integration testing via WebApplicationFactory.
+/// </summary>
+public partial class Program
 {
+    /// <summary>
+    /// Application entry point.
+    /// </summary>
     public static async Task Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
@@ -282,11 +289,18 @@ internal static class Program
 }
 
 // DTOs and helpers in the same namespace
-internal sealed class GatewayOrderCreated
+/// <summary>
+/// DTO used by the stream ingestion endpoints to simulate orders coming from gateways.
+/// </summary>
+public sealed class GatewayOrderCreated
 {
+    /// <summary>Order identifier.</summary>
     public string Id { get; set; } = string.Empty;
+    /// <summary>Order amount/value.</summary>
     public int Valor { get; set; }
+    /// <summary>Event timestamp in UTC.</summary>
     public DateTime Timestamp { get; set; }
+    /// <summary>Identifier of the gateway that produced the event.</summary>
     public string GatewayId { get; set; } = string.Empty;
 }
 
