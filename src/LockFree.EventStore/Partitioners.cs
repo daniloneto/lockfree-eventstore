@@ -17,18 +17,6 @@ public static class Partitioners
     }
 
     /// <summary>
-    /// Specialized overload for Event to avoid generic hashing. Uses KeyId directly.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int ForKey(Event e, int partitions)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitions);
-        return PerformanceHelpers.IsPowerOfTwo(partitions)
-            ? PerformanceHelpers.FastMod(e.Key.Value, partitions)
-            : e.Key.Value % partitions;
-    }
-
-    /// <summary>
     /// Maps a KeyId to a partition index using optimized integer arithmetic.
     /// This is the hot path version that avoids string hashing.
     /// </summary>
