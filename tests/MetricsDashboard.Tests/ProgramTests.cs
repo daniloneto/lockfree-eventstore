@@ -144,12 +144,21 @@ public class ProgramTests : IClassFixture<WebApplicationFactory<Program>>
 
         var clear = await client.PostAsync("/admin/clear", null);
         clear.EnsureSuccessStatusCode();
+        var clearPayload = await clear.Content.ReadFromJsonAsync<AdminClearResponse>();
+        Assert.NotNull(clearPayload);
+        Assert.True(clearPayload!.Cleared);
 
         var reset = await client.PostAsync("/admin/reset", null);
         reset.EnsureSuccessStatusCode();
+        var resetPayload = await reset.Content.ReadFromJsonAsync<AdminResetResponse>();
+        Assert.NotNull(resetPayload);
+        Assert.True(resetPayload!.Reset);
 
         var purge = await client.PostAsync($"/admin/purge?olderThanMinutes=1", null);
         purge.EnsureSuccessStatusCode();
+        var purgePayload = await purge.Content.ReadFromJsonAsync<AdminPurgeResponse>();
+        Assert.NotNull(purgePayload);
+        Assert.True(purgePayload!.PurgedBefore <= DateTime.UtcNow);
     }
 }
 
@@ -190,4 +199,19 @@ internal sealed class GatewayAgg
 {
     public int Count { get; set; }
     public long Sum { get; set; }
+}
+
+internal sealed class AdminClearResponse
+{
+    public bool Cleared { get; set; }
+}
+
+internal sealed class AdminResetResponse
+{
+    public bool Reset { get; set; }
+}
+
+internal sealed class AdminPurgeResponse
+{
+    public DateTime PurgedBefore { get; set; }
 }

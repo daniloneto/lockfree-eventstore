@@ -11,6 +11,12 @@ namespace MetricsDashboard;
 public partial class Program
 {
     /// <summary>
+    /// Initializes a new instance of the Program class.
+    /// Protected to satisfy analyzers while keeping the type instantiable for test frameworks.
+    /// </summary>
+    protected Program() { }
+
+    /// <summary>
     /// Application entry point.
     /// </summary>
     public static async Task Main(string[] args)
