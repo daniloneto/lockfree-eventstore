@@ -178,7 +178,7 @@ public class StatsCallbackTests
     }
     
     [Fact]
-    public void OnStatsUpdated_ConcurrentAccess()
+    public async Task OnStatsUpdated_ConcurrentAccess()
     {
         // Arrange
         var collected = new List<StoreStats>();
@@ -209,10 +209,10 @@ public class StatsCallbackTests
                 {
                     store.TryAppend(taskId * 10 + j);
                 }
-            });
+            }, TestContext.Current.CancellationToken);
         }
         
-        Task.WaitAll(tasks);
+        await Task.WhenAll(tasks);
         
         // Assert
         lock (lockObj)
