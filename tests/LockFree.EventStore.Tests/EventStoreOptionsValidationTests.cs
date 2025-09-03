@@ -13,7 +13,7 @@ public class EventStoreOptionsValidationTests
         {
             BucketCount = 0
         };
-        Assert.Throws<ArgumentOutOfRangeException>(() => opts.Validate());
+        Assert.Throws<InvalidOperationException>(() => opts.Validate());
     }
 
     [Theory]
@@ -25,7 +25,7 @@ public class EventStoreOptionsValidationTests
         {
             BucketWidthTicks = width
         };
-        Assert.Throws<ArgumentOutOfRangeException>(() => opts.Validate());
+        Assert.Throws<InvalidOperationException>(() => opts.Validate());
     }
 
     [Fact]
@@ -36,7 +36,7 @@ public class EventStoreOptionsValidationTests
             WindowSizeTicks = TimeSpan.FromMinutes(1).Ticks,
             BucketWidthTicks = TimeSpan.FromMinutes(2).Ticks
         };
-        Assert.Throws<ArgumentException>(() => opts.Validate());
+        Assert.Throws<InvalidOperationException>(() => opts.Validate());
     }
 
     [Fact]
@@ -47,7 +47,7 @@ public class EventStoreOptionsValidationTests
             WindowSizeTicks = TimeSpan.FromMinutes(5).Ticks,
             BucketWidthTicks = TimeSpan.FromMinutes(2).Ticks
         };
-        Assert.Throws<ArgumentException>(() => opts.Validate());
+        Assert.Throws<InvalidOperationException>(() => opts.Validate());
     }
 
     [Fact]
@@ -69,6 +69,6 @@ public class EventStoreOptionsValidationTests
         {
             BucketCount = 0
         };
-        Assert.Throws<ArgumentOutOfRangeException>(() => new EventStore<Order>(opts));
+        Assert.Throws<InvalidOperationException>(() => new EventStore<Order>(opts));
     }
 }
