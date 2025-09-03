@@ -20,7 +20,7 @@ public class ConcurrencyTests
             {
                 for (int i = 0; i < eventsPerProducer; i++)
                     store.TryAppend(id * eventsPerProducer + i);
-            });
+            }, TestContext.Current.CancellationToken);
         }
         await Task.WhenAll(tasks);
         Assert.True(store.CountApprox > 0);
