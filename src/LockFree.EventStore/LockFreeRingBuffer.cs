@@ -1,4 +1,3 @@
-using System.Threading;
 using System.Runtime.CompilerServices;
 using System.Buffers;
 
@@ -68,7 +67,7 @@ public sealed class LockFreeRingBuffer<T>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int TryEnqueue(ReadOnlySpan<T> batch)
     {
-        int written = 0;
+        var written = 0;
         foreach (var item in batch)
         {
             _ = TryEnqueue(item);
@@ -94,7 +93,7 @@ public sealed class LockFreeRingBuffer<T>
         var startPosition = endTail - batch.Length;
 
         // Write all items to their reserved positions
-        for (int i = 0; i < batch.Length; i++)
+        for (var i = 0; i < batch.Length; i++)
         {
             var position = startPosition + i;
             _buffer[position % Capacity] = batch[i];
@@ -128,7 +127,7 @@ public sealed class LockFreeRingBuffer<T>
                 // Notify about each discarded item if callback is provided
                 if (_onItemDiscarded != null)
                 {
-                    for (long h = head; h < desiredHead; h++)
+                    for (var h = head; h < desiredHead; h++)
                     {
                         var idx = (int)(h % Capacity);
                         var discardedItem = _buffer[idx];
@@ -151,9 +150,9 @@ public sealed class LockFreeRingBuffer<T>
         // Clear the array to help GC
         if (head < tail)
         {
-            for (long i = head; i < tail; i++)
+            for (var i = head; i < tail; i++)
             {
-                _buffer[i % Capacity] = default(T)!;
+                _buffer[i % Capacity] = default!;
             }
         }
 
@@ -195,7 +194,7 @@ public sealed class LockFreeRingBuffer<T>
             var secondSource = _buffer.AsSpan(0, secondSegmentLength);
 
             firstSource.CopyTo(destination);
-            secondSource.CopyTo(destination.Slice(firstSegmentLength));
+            secondSource.CopyTo(destination[firstSegmentLength..]);
         }
 
         return length;
@@ -207,7 +206,7 @@ public sealed class LockFreeRingBuffer<T>
         var tmp = new T[Capacity];
         var len = Snapshot(tmp);
         var results = new List<T>(len);
-        for (int i = 0; i < len; i++)
+        for (var i = 0; i < len; i++)
         {
             results.Add(tmp[i]);
         }
@@ -224,7 +223,7 @@ public sealed class LockFreeRingBuffer<T>
     {
         const int maxRetries = 10;
 
-        for (int retry = 0; retry < maxRetries; retry++)
+        for (var retry = 0; retry < maxRetries; retry++)
         {
             var startEpoch = Volatile.Read(ref _epoch);
             var head = Volatile.Read(ref _head);
@@ -259,7 +258,7 @@ public sealed class LockFreeRingBuffer<T>
 
         const int maxRetries = 10;
 
-        for (int retry = 0; retry < maxRetries; retry++)
+        for (var retry = 0; retry < maxRetries; retry++)
         {
             var startEpoch = Volatile.Read(ref _epoch);
             var head = Volatile.Read(ref _head);
@@ -342,9 +341,9 @@ public sealed class LockFreeRingBuffer<T>
 
         // Find the range of valid events
         int validStart = -1, validEnd = -1;
-        int validCount = 0;
+        var validCount = 0;
 
-        for (int i = 0; i < totalCount; i++)
+        for (var i = 0; i < totalCount; i++)
         {
             var index = (int)((head + i) % Capacity);
             var item = _buffer[index]; if (timestampSelector != null)
@@ -492,7 +491,7 @@ public sealed class LockFreeRingBuffer<T>
             if (len > 0)
             {
                 // Process in chunks
-                for (int i = 0; i < len; i += chunkSize)
+                for (var i = 0; i < len; i += chunkSize)
                 {
                     var chunkLen = Math.Min(chunkSize, len - i);
                     processor(buffer.AsSpan(i, chunkLen));
@@ -519,10 +518,10 @@ public sealed class LockFreeRingBuffer<T>
             var index = (head + i) % Capacity;
             var item = _buffer[index];
 
-            var result = processor(state, item);
-            state = result.State;
+            var (State, Continue) = processor(state, item);
+            state = State;
 
-            if (!result.Continue)
+            if (!Continue)
             {
                 break; // Early termination
             }
