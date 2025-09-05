@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.0.12 - 2025-09-04
+### Added
+- Significantly expanded test coverage: invalid options, additional validations, window/aggregation (bucketed & runtime), statistics callbacks, zero-allocation paths, concurrency, internal ring buffer and partitions.
+- Tests for additional construction scenarios (EventStoreBuilder) and internal branching.
+### Changed
+- Validation exceptions in `EventStoreOptions` now use `InvalidOperationException` for clarity and consistency.
+- Standardized local variable declarations to `var` where appropriate.
+- Internal refactors (ring buffer / partitioners) for readability and micro-optimizations.
+### Performance
+- Maintained zero-allocation optimizations and reinforced validations to keep hot path overhead low.
+### Tests
+- Consolidated and expanded suites increasing branch and line coverage.
+
+## 1.0.11 - 2025-08-26
+### Added
+- `MetricsDashboard` tests and integration improvements (testable `Program`).
+### Changed
+- Enhanced performance metrics and error handling in PowerShell scripts.
+- Standardized UTC timestamps in scripts and metrics.
+- Improved aggregation tests.
+### Fixed
+- Sample adjustments and fixes.
+### Performance
+- Fine tuning of metrics and aggregations reducing latency under load.
+
+## 1.0.10 - 2025-08-25
+### Removed
+- Obsolete code and tests (OptimizedPartition, Padding, SpecializedEventStore duplicates / redundant paths) reducing complexity and build/test time.
+### Changed
+- Slimmed test suite focusing on active paths while retaining essential coverage.
+
+## 1.0.9 - 2025-08-24
+### Added
+- Runtime window tracking option with associated tests.
+- Bucketed window aggregation for more precise temporal analysis.
+- Explicit validation of `EventStoreOptions` (constructors perform early validation).
+- Additional zero-allocation optimizations (snapshots, aggregations, query methods) plus padded counters to reduce false sharing.
+### Changed
+- Readability/performance refactors in stores and telemetry counters.
+- README revised for clearer explanation of features, windows and performance.
+### Performance
+- Adoption of zero-allocation query methods in tests and hot execution paths.
+### Tests
+- Expanded coverage: window tracking, ring buffer, aggregations, snapshots and validation paths.
+
 ## 1.0.8 - 2025-08-21
 
 New Features
