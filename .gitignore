@@ -61,3 +61,4 @@ local/
 .editorconfig
 
 *.zip
+sonar-issues.md
