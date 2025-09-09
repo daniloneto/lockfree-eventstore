@@ -418,4 +418,50 @@ public sealed class PaddedLockFreeRingBuffer<T>
 
         return results;
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool TryCopyStable(out T[] items, out long version)
+    {
+        const int maxAttempts = 8;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var head1 = Volatile.Read(ref _header.Head);
+            var tail = Volatile.Read(ref _header.Tail);
+            var head2 = Volatile.Read(ref _header.Head);
+            if (head1 != head2)
+            {
+                continue;
+            }
+            var capacity = Capacity;
+            var available = tail - head1;
+            if (available <= 0)
+            {
+                items = Array.Empty<T>();
+                version = 0;
+                return true;
+            }
+            var count = (int)Math.Min(available, capacity);
+            var start = head1;
+            var end = start + count;
+            var headIndex = (int)(start % capacity);
+            var buffer = new T[count];
+            if (headIndex + count <= capacity)
+            {
+                Array.Copy(_buffer, headIndex, buffer, 0, count);
+            }
+            else
+            {
+                var first = capacity - headIndex;
+                var second = count - first;
+                Array.Copy(_buffer, headIndex, buffer, 0, first);
+                Array.Copy(_buffer, 0, buffer, first, second);
+            }
+            items = buffer;
+            version = end;
+            return true;
+        }
+        items = Array.Empty<T>();
+        version = 0;
+        return false;
+    }
 }
