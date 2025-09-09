@@ -58,8 +58,6 @@ artifacts/
 
 local/
 
-.editorconfig
-
 *.zip
 sonar-issues.md
 checklist.md

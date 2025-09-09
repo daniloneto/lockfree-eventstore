@@ -27,7 +27,7 @@ public sealed partial class EventStore<TEvent>
     private PaddedLong _windowAdvanceCount;
 
     private Snapshotter? _snapshotterRef; // published via Volatile.Read/Write for safe publication
-    private volatile bool _snapConfigured; // guarded by _snapshotInitLock for configuration, volatile for visibility after init
+    private bool _snapConfigured; // accessed under _snapshotInitLock or via Volatile.Read/Write for publication
     private readonly object _snapshotInitLock = new();
 
     /// <summary>
@@ -2035,17 +2035,29 @@ public sealed partial class EventStore<TEvent>
             SnapshotValidation.ValidateSnapshotOptions(options, serializer, store);
             var snap = new Snapshotter(Unsafe.As<EventStore<Event>>(this), options, serializer, store, logger, deltaWriter, backoff);
             AttachSnapshotter(snap);
-            _snapConfigured = true; // publish after successful creation
+            // Publish configured flag with release semantics to ensure visibility of initialized snapshotter.
+            Volatile.Write(ref _snapConfigured, true);
             return snap;
         }
     }
 
     /// <summary>
     /// Restores in-memory partitions from latest snapshots (if snapshot subsystem configured). Returns number of partitions restored.
+    /// Acquires the snapshot init lock to avoid racing with concurrent configuration so we do not return 0 while configuration is in-flight.
     /// </summary>
     public Task<int> RestoreFromSnapshotsAsync(CancellationToken ct = default)
     {
-        return !_snapConfigured || _snapshotterRef is null ? Task.FromResult(0) : _snapshotterRef.RestoreFromSnapshotsAsync(ct);
+        Snapshotter? snap;
+        lock (_snapshotInitLock)
+        {
+            // Use volatile read to ensure we see the publication from ConfigureSnapshots.
+            if (!Volatile.Read(ref _snapConfigured) || _snapshotterRef is null)
+            {
+                return Task.FromResult(0);
+            }
+            snap = _snapshotterRef; // snapshot of reference while under lock
+        }
+        return snap.RestoreFromSnapshotsAsync(ct);
     }
 
     /// <summary>

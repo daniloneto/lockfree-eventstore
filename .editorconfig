@@ -1,0 +1,45 @@
+# Root editorconfig enforcing code quality and complexity for Sonar and analyzers
+root = true
+
+[*.cs]
+# .NET analyzers
+dotnet_analyzer_diagnostic.severity = warning
+
+# Treat specific rules as errors in main src
+# Example: cognitive complexity (Sonar rule key S3776) via SonarCloud gates, but we also keep methods small
+# Naming and style
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = true:suggestion
+
+# Prefer 'static readonly' for fields
+dotnet_style_readonly_field = true:suggestion
+
+# Prefer file-scoped namespaces
+csharp_style_namespace_declarations = file_scoped:suggestion
+
+# Pattern matching and modern operators
+csharp_style_prefer_pattern_matching = true:suggestion
+csharp_style_prefer_switch_expression = true:suggestion
+
+# Prefer explicit tuple names
+dotnet_style_explicit_tuple_names = true:suggestion
+
+# Prefer simplified boolean expressions
+dotnet_style_prefer_simplified_boolean_expressions = true:suggestion
+
+# Nullability
+dotnet_diagnostic.CS8602.severity = warning
+
+# Enforce small methods by nudging max statements (non-binding; tracked by Sonar gate)
+# Use comments in PR to track methods > 40 lines
+
+# Test project overrides
+[tests/**/*.cs]
+# Allow usage of obsolete members in tests to assert backward compatibility
+dotnet_diagnostic.CS0618.severity = silent
+# Also silence custom obsolete diagnostic ID used via [Obsolete(DiagnosticId = "LF0001")]
+dotnet_diagnostic.LF0001.severity = silent
+
+# Reduce noise in tests
+dotnet_analyzer_diagnostic.severity = suggestion

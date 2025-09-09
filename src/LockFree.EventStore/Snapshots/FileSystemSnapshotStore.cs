@@ -150,7 +150,8 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
         {
             return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>(null);
         }
-        var stream = new FileStream(bestPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        // Use broad FileShare to allow deletion while stream still open (tests clean up directories immediately on Windows)
+        var stream = new FileStream(bestPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         var result = (bestMeta.Value, (Stream)stream);
         return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>(result);
     }
