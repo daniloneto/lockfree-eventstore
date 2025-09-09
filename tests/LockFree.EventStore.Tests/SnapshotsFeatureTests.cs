@@ -18,8 +18,8 @@ public class SnapshotsFeatureTests
     [Fact]
     public void StableViewUnderLoad_BasicCoherence()
     {
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition = 512, Partitions = 2 });
-        var mi = typeof(EventStore<Event>).GetMethod("TryGetStableView", BindingFlags.NonPublic|BindingFlags.Instance);
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 512, Partitions = 2 });
+        var mi = typeof(EventStore<Event>).GetMethod("TryGetStableView", BindingFlags.NonPublic | BindingFlags.Instance);
         Assert.NotNull(mi);
         var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
         var producer = Task.Run(() =>
@@ -35,7 +35,7 @@ public class SnapshotsFeatureTests
         var samples = 0;
         while (!cts.IsCancellationRequested)
         {
-            object?[] args = ["0", null!];
+            object?[] args = new object?[] { "0", null };
             var ok = (bool)mi!.Invoke(store, args)!;
             if (ok)
             {
@@ -53,10 +53,10 @@ public class SnapshotsFeatureTests
     [Fact]
     public async Task SnapshotDisabled_NoSaves()
     {
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=64, Partitions=1 });
-        var ss = store.ConfigureSnapshots(new SnapshotOptions{ Enabled=false, Interval=TimeSpan.FromMilliseconds(10) }, new InMemoryJsonSnapshotSerializer(), new InMemorySnapshotStore());
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
+        var ss = store.ConfigureSnapshots(new SnapshotOptions { Enabled = false, Interval = TimeSpan.FromMilliseconds(10) }, new InMemoryJsonSnapshotSerializer(), new InMemorySnapshotStore());
         // Append events and run loop briefly
-        for (int i=0;i<100;i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
+        for (int i = 0; i < 100; i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
         await ss.RunAsync(cts.Token); // should effectively no-op
         var metricsAvailable = store.TryGetSnapshotMetrics(out var m);
@@ -67,13 +67,13 @@ public class SnapshotsFeatureTests
     [Fact]
     public async Task SnapshotEnabled_SavesTriggered()
     {
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=128, Partitions=2 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 128, Partitions = 2 });
         var ser = new InMemoryJsonSnapshotSerializer();
         var backend = new InMemorySnapshotStore();
-        var ss = store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(50), MinEventsBetweenSnapshots=10, MaxConcurrentSnapshotJobs=2 }, ser, backend);
+        var ss = store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(50), MinEventsBetweenSnapshots = 10, MaxConcurrentSnapshotJobs = 2 }, ser, backend);
         // Drive appends
         var key = new KeyId(1);
-        for (int i=0;i<200;i++) store.TryAppend(new Event(key, i, DateTime.UtcNow.Ticks));
+        for (int i = 0; i < 200; i++) store.TryAppend(new Event(key, i, DateTime.UtcNow.Ticks));
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(400));
         await ss.RunAsync(cts.Token);
         var ok = store.TryGetSnapshotMetrics(out var metrics);
@@ -86,11 +86,11 @@ public class SnapshotsFeatureTests
     public void StableView_WrapAround_Coherence()
     {
         var cap = 32;
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition = cap, Partitions = 1 });
-        var mi = typeof(EventStore<Event>).GetMethod("TryGetStableView", BindingFlags.NonPublic|BindingFlags.Instance)!;
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = cap, Partitions = 1 });
+        var mi = typeof(EventStore<Event>).GetMethod("TryGetStableView", BindingFlags.NonPublic | BindingFlags.Instance)!;
         var key = new KeyId(1);
         // Force multiple wraps
-        for (int i=0;i<cap*5;i++) store.TryAppend(new Event(key, i, DateTime.UtcNow.Ticks));
+        for (int i = 0; i < cap * 5; i++) store.TryAppend(new Event(key, i, DateTime.UtcNow.Ticks));
         object?[] args = ["0", null!];
         var ok = (bool)mi.Invoke(store, args)!;
         Assert.True(ok);
@@ -105,34 +105,34 @@ public class SnapshotsFeatureTests
     {
         int failTimes = 3; // number of failing attempts before a success
         var delays = new List<TimeSpan>();
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=64, Partitions=1 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
         var serializer = new InMemoryJsonSnapshotSerializer();
         FlakyInMemoryStore? backend = null;
         backend = new FlakyInMemoryStore(() => backend!.Attempts <= failTimes); // fail first failTimes attempts (<=)
-        var snap = store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots=5, MaxSaveAttempts=failTimes+3, BackoffBaseDelay=TimeSpan.FromMilliseconds(2), BackoffFactor=2 }, serializer, backend);
+        var snap = store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots = 5, MaxSaveAttempts = failTimes + 3, BackoffBaseDelay = TimeSpan.FromMilliseconds(2), BackoffFactor = 2 }, serializer, backend);
         var policy = new TestBackoffPolicy(d => delays.Add(d));
-        typeof(Snapshotter).GetField("_backoff", BindingFlags.NonPublic|BindingFlags.Instance)!.SetValue(snap, policy);
-        for (int i=0;i<50;i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
+        typeof(Snapshotter).GetField("_backoff", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(snap, policy);
+        for (int i = 0; i < 50; i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
         await snap.RunAsync(cts.Token);
         // We expect failTimes delays recorded (one per failed attempt)
         Assert.True(delays.Count >= failTimes, $"Delays={delays.Count} Attempts={backend.Attempts}");
         // Ensure at least one success (Attempts should be > failTimes)
         Assert.True(backend.Attempts > failTimes, $"Attempts={backend.Attempts}");
-        for (int i=0;i<delays.Count-1;i++)
+        for (int i = 0; i < delays.Count - 1; i++)
         {
-            Assert.True(delays[i+1] > delays[i]*0.9, $"Delay not increasing: {delays[i]} -> {delays[i+1]}");
+            Assert.True(delays[i + 1] > delays[i] * 0.9, $"Delay not increasing: {delays[i]} -> {delays[i + 1]}");
         }
     }
 
     [Fact]
     public async Task Failure_MaxAttemptsRecorded()
     {
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=64, Partitions=1 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
         var serializer = new InMemoryJsonSnapshotSerializer();
-        var backend = new FlakyInMemoryStore(alwaysFail:true);
-        var snap = store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots=5, MaxSaveAttempts=3, BackoffBaseDelay=TimeSpan.FromMilliseconds(3), BackoffFactor=1.5 }, serializer, backend);
-        for (int i=0;i<40;i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
+        var backend = new FlakyInMemoryStore(alwaysFail: true);
+        var snap = store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots = 5, MaxSaveAttempts = 3, BackoffBaseDelay = TimeSpan.FromMilliseconds(3), BackoffFactor = 1.5 }, serializer, backend);
+        for (int i = 0; i < 40; i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(600));
         await snap.RunAsync(cts.Token);
         var ok = store.TryGetSnapshotMetrics(out var metrics);
@@ -144,18 +144,18 @@ public class SnapshotsFeatureTests
     [Fact]
     public async Task Pruning_KeepsRecent()
     {
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=128, Partitions=1 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 128, Partitions = 1 });
         var ser = new InMemoryJsonSnapshotSerializer();
         var backend = new InMemorySnapshotStore();
-        var snap = store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots=10, SnapshotsToKeep=3 }, ser, backend);
-        for (int round=0;round<5;round++)
+        var snap = store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots = 10, SnapshotsToKeep = 3 }, ser, backend);
+        for (int round = 0; round < 5; round++)
         {
-            for (int i=0;i<20;i++) store.TryAppend(new Event(new KeyId(1), i + round*100, DateTime.UtcNow.Ticks));
+            for (int i = 0; i < 20; i++) store.TryAppend(new Event(new KeyId(1), i + round * 100, DateTime.UtcNow.Ticks));
             using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(60));
             await snap.RunAsync(cts.Token);
         }
         // Force restore path to view persisted list (indirect via backend reflection)
-        var field = typeof(InMemorySnapshotStore).GetField("_data", BindingFlags.NonPublic|BindingFlags.Instance)!;
+        var field = typeof(InMemorySnapshotStore).GetField("_data", BindingFlags.NonPublic | BindingFlags.Instance)!;
         var dict = (System.Collections.Concurrent.ConcurrentDictionary<string, List<(SnapshotMetadata Meta, byte[] Data)>>)field.GetValue(backend)!;
         Assert.True(dict.TryGetValue("0", out var list));
         Assert.True(list.Count <= 3); // pruned
@@ -164,19 +164,19 @@ public class SnapshotsFeatureTests
     [Fact]
     public async Task Restore_RebuildsState()
     {
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=256, Partitions=1 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 256, Partitions = 1 });
         var ser = new InMemoryJsonSnapshotSerializer();
         var backend = new InMemorySnapshotStore();
-        var snap = store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots=5 }, ser, backend);
+        var snap = store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots = 5 }, ser, backend);
         var key = new KeyId(1);
-        for (int i=0;i<80;i++) store.TryAppend(new Event(key, i, DateTime.UtcNow.Ticks));
+        for (int i = 0; i < 80; i++) store.TryAppend(new Event(key, i, DateTime.UtcNow.Ticks));
         using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(120)))
         {
             await snap.RunAsync(cts.Token);
         }
         // create new store and restore
-        var store2 = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=256, Partitions=1 });
-        store2.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromSeconds(10), MinEventsBetweenSnapshots=1000 }, ser, backend);
+        var store2 = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 256, Partitions = 1 });
+        store2.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromSeconds(10), MinEventsBetweenSnapshots = 1000 }, ser, backend);
         var restored = await store2.RestoreFromSnapshotsAsync();
         Assert.Equal(1, restored);
         Assert.True(store2.CountApprox > 0);
@@ -185,16 +185,16 @@ public class SnapshotsFeatureTests
     [Fact]
     public async Task Restore_InvalidSchema_Ignored()
     {
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=64, Partitions=1 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
         var ser = new BinarySnapshotSerializer();
         var backend = new InMemorySnapshotStore();
-        var snap = store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots=1 }, ser, backend);
-        for (int i=0;i<5;i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
+        var snap = store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots = 1 }, ser, backend);
+        for (int i = 0; i < 5; i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
         using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150)))
         {
             await snap.RunAsync(cts.Token);
         }
-        var field = typeof(InMemorySnapshotStore).GetField("_data", BindingFlags.NonPublic|BindingFlags.Instance)!;
+        var field = typeof(InMemorySnapshotStore).GetField("_data", BindingFlags.NonPublic | BindingFlags.Instance)!;
         var dict = (System.Collections.Concurrent.ConcurrentDictionary<string, List<(SnapshotMetadata Meta, byte[] Data)>>)field.GetValue(backend)!;
         Assert.True(dict.TryGetValue("0", out var list));
         var tuple = list[^1];
@@ -202,8 +202,8 @@ public class SnapshotsFeatureTests
         {
             tuple.Data[0] = 99; tuple.Data[1] = 0; tuple.Data[2] = 0; tuple.Data[3] = 0;
         }
-        var newStore = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=64, Partitions=1 });
-        newStore.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromSeconds(10), MinEventsBetweenSnapshots=1000 }, ser, backend);
+        var newStore = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
+        newStore.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromSeconds(10), MinEventsBetweenSnapshots = 1000 }, ser, backend);
         var restored = await newStore.RestoreFromSnapshotsAsync();
         Assert.Equal(0, restored);
     }
@@ -211,13 +211,13 @@ public class SnapshotsFeatureTests
     [Fact]
     public void FailFast_InvalidOptions()
     {
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=32, Partitions=1 });
-        Assert.Throws<ArgumentOutOfRangeException>(() => store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.Zero, MinEventsBetweenSnapshots=0 }, new InMemoryJsonSnapshotSerializer(), new InMemorySnapshotStore()));
-        Assert.Throws<ArgumentOutOfRangeException>(() => store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots=1, MaxConcurrentSnapshotJobs=0 }, new InMemoryJsonSnapshotSerializer(), new InMemorySnapshotStore()));
-        Assert.Throws<ArgumentOutOfRangeException>(() => store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots=1, SnapshotsToKeep=0 }, new InMemoryJsonSnapshotSerializer(), new InMemorySnapshotStore()));
-        Assert.Throws<ArgumentOutOfRangeException>(() => store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots=1, MaxSaveAttempts=0 }, new InMemoryJsonSnapshotSerializer(), new InMemorySnapshotStore()));
-        Assert.Throws<ArgumentNullException>(() => store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots=1 }, null!, new InMemorySnapshotStore()));
-        Assert.Throws<ArgumentNullException>(() => store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots=1 }, new InMemoryJsonSnapshotSerializer(), null!));
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 32, Partitions = 1 });
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.Zero, MinEventsBetweenSnapshots = 0 }, new InMemoryJsonSnapshotSerializer(), new InMemorySnapshotStore()));
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots = 1, MaxConcurrentSnapshotJobs = 0 }, new InMemoryJsonSnapshotSerializer(), new InMemorySnapshotStore()));
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots = 1, SnapshotsToKeep = 0 }, new InMemoryJsonSnapshotSerializer(), new InMemorySnapshotStore()));
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots = 1, MaxSaveAttempts = 0 }, new InMemoryJsonSnapshotSerializer(), new InMemorySnapshotStore()));
+        Assert.Throws<ArgumentNullException>(() => store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots = 1 }, null!, new InMemorySnapshotStore()));
+        Assert.Throws<ArgumentNullException>(() => store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(10), MinEventsBetweenSnapshots = 1 }, new InMemoryJsonSnapshotSerializer(), null!));
     }
 
     [Fact]
@@ -227,11 +227,11 @@ public class SnapshotsFeatureTests
         Directory.CreateDirectory(tmpDir);
         try
         {
-            var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=64, Partitions=1 });
+            var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
             var ser = new BinarySnapshotSerializer();
             var fsStore = new FileSystemSnapshotStore(tmpDir);
-            var snap = store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots=1 }, ser, fsStore);
-            for (int i=0;i<6;i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
+            var snap = store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots = 1 }, ser, fsStore);
+            for (int i = 0; i < 6; i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
             using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200)))
             {
                 await snap.RunAsync(cts.Token);
@@ -243,7 +243,18 @@ public class SnapshotsFeatureTests
         }
         finally
         {
-            if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, recursive:true);
+            if (Directory.Exists(tmpDir))
+            {
+                try
+                {
+                    Directory.Delete(tmpDir, recursive: true);
+                }
+                catch (Exception ex)
+                {
+                    // Do not let cleanup failure mask test result
+                    Console.Error.WriteLine($"[AtomicWrite_TempRename] Cleanup failed for {tmpDir}: {ex}");
+                }
+            }
         }
     }
 
@@ -251,12 +262,12 @@ public class SnapshotsFeatureTests
     public async Task Backpressure_QueueFullSkips()
     {
         // Use many partitions so a single trigger enqueues more jobs than MaxPendingSnapshotJobs allows.
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=32, Partitions=8 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 32, Partitions = 8 });
         var ser = new InMemoryJsonSnapshotSerializer();
         var backend = new InMemorySnapshotStore();
-        var snap = store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots=1, MaxPendingSnapshotJobs=2, MaxConcurrentSnapshotJobs=1 }, ser, backend);
+        var snap = store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots = 1, MaxPendingSnapshotJobs = 2, MaxConcurrentSnapshotJobs = 1 }, ser, backend);
         // Append events to trigger snapshots repeatedly
-        for (int i=0;i<200;i++) store.TryAppend(new Event(new KeyId(i%8 + 1), i, DateTime.UtcNow.Ticks));
+        for (int i = 0; i < 200; i++) store.TryAppend(new Event(new KeyId(i % 8 + 1), i, DateTime.UtcNow.Ticks));
         using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
         {
             await snap.RunAsync(cts.Token);
@@ -269,18 +280,18 @@ public class SnapshotsFeatureTests
     public void LatencyRegression_WithinThreshold()
     {
         const int iterations = 50_000;
-        var baseStore = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=128, Partitions=1 });
+        var baseStore = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 128, Partitions = 1 });
         var key = new KeyId(1);
         var sw = Stopwatch.StartNew();
-        for (int i=0;i<iterations;i++) baseStore.TryAppend(new Event(key, i, DateTime.UtcNow.Ticks));
+        for (int i = 0; i < iterations; i++) baseStore.TryAppend(new Event(key, i, DateTime.UtcNow.Ticks));
         sw.Stop();
         var baselinePerOp = sw.Elapsed.TotalMilliseconds / iterations;
 
-        var snapStore = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=128, Partitions=1 });
+        var snapStore = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 128, Partitions = 1 });
         var ser = new InMemoryJsonSnapshotSerializer();
-        snapStore.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromSeconds(10), MinEventsBetweenSnapshots=int.MaxValue }, ser, new InMemorySnapshotStore()); // snapshots configured but won't trigger
+        snapStore.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromSeconds(10), MinEventsBetweenSnapshots = int.MaxValue }, ser, new InMemorySnapshotStore()); // snapshots configured but won't trigger
         sw.Restart();
-        for (int i=0;i<iterations;i++) snapStore.TryAppend(new Event(key, i, DateTime.UtcNow.Ticks));
+        for (int i = 0; i < iterations; i++) snapStore.TryAppend(new Event(key, i, DateTime.UtcNow.Ticks));
         sw.Stop();
         var withFeaturePerOp = sw.Elapsed.TotalMilliseconds / iterations;
         var increase = (withFeaturePerOp - baselinePerOp) / baselinePerOp;
@@ -290,17 +301,17 @@ public class SnapshotsFeatureTests
     [Fact]
     public async Task Restore_InvalidSchema_FailFast()
     {
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=64, Partitions=1 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
         var ser = new BinarySnapshotSerializer();
         var backend = new InMemorySnapshotStore();
-        var snap = store.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots=1 }, ser, backend);
-        for (int i=0;i<5;i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
+        var snap = store.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromMilliseconds(5), MinEventsBetweenSnapshots = 1 }, ser, backend);
+        for (int i = 0; i < 5; i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
         using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150)))
         {
             await snap.RunAsync(cts.Token);
         }
         // Corrupt schema version bytes
-        var field = typeof(InMemorySnapshotStore).GetField("_data", BindingFlags.NonPublic|BindingFlags.Instance)!;
+        var field = typeof(InMemorySnapshotStore).GetField("_data", BindingFlags.NonPublic | BindingFlags.Instance)!;
         var dict = (System.Collections.Concurrent.ConcurrentDictionary<string, List<(SnapshotMetadata Meta, byte[] Data)>>)field.GetValue(backend)!;
         Assert.True(dict.TryGetValue("0", out var list));
         var tuple = list[^1];
@@ -308,8 +319,8 @@ public class SnapshotsFeatureTests
         {
             tuple.Data[0] = 99; tuple.Data[1] = 0; tuple.Data[2] = 0; tuple.Data[3] = 0; // schema=99
         }
-        var newStore = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=64, Partitions=1 });
-        newStore.ConfigureSnapshots(new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromSeconds(10), MinEventsBetweenSnapshots=1000, ExpectedSchemaVersion=1 }, ser, backend);
+        var newStore = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
+        newStore.ConfigureSnapshots(new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromSeconds(10), MinEventsBetweenSnapshots = 1000, ExpectedSchemaVersion = 1 }, ser, backend);
         await Assert.ThrowsAsync<InvalidOperationException>(async () => await newStore.RestoreFromSnapshotsAsync());
     }
 
@@ -325,7 +336,7 @@ public class SnapshotsFeatureTests
             var dir = Path.Combine(tmpDir, partition);
             Directory.CreateDirectory(dir);
             var baseTicks = DateTimeOffset.UtcNow.UtcTicks;
-            var entries = new List<(long ver,long ticks)>
+            var entries = new List<(long ver, long ticks)>
             {
                 (1, baseTicks+10),
                 (2, baseTicks+20),
@@ -339,7 +350,7 @@ public class SnapshotsFeatureTests
             foreach (var e in entries.OrderBy(_ => Guid.NewGuid()))
             {
                 var meta = new SnapshotMetadata(partition, e.ver, new DateTimeOffset(e.ticks, TimeSpan.Zero), 1);
-                using var ms = new MemoryStream(new byte[]{1,2,3});
+                using var ms = new MemoryStream(new byte[] { 1, 2, 3 });
                 await fs.SaveAsync(meta, ms);
             }
             // Add stray temp & unrelated file
@@ -349,10 +360,10 @@ public class SnapshotsFeatureTests
             var remaining = Directory.GetFiles(dir, "*.snap").Select(Path.GetFileName).ToArray();
             Assert.Equal(3, remaining.Length);
             // Expected kept: (5,ticks+45),(5,ticks+40),(4,ticks+35)
-            bool Has(long v,long t) => remaining.Any(f => f!.Contains($"_{v}_{t}"));
-            Assert.True(Has(5, baseTicks+45));
-            Assert.True(Has(5, baseTicks+40));
-            Assert.True(Has(4, baseTicks+35));
+            bool Has(long v, long t) => remaining.Any(f => f!.Contains($"_{v}_{t}"));
+            Assert.True(Has(5, baseTicks + 45));
+            Assert.True(Has(5, baseTicks + 40));
+            Assert.True(Has(4, baseTicks + 35));
         }
         finally
         {
@@ -373,10 +384,10 @@ public class SnapshotsFeatureTests
             Directory.CreateDirectory(partitionDir);
             // Create stray .tmp with very large version that would win if considered
             var tmpName = $"{partition}_999_{DateTimeOffset.UtcNow.UtcTicks}.snap.tmp";
-            File.WriteAllBytes(Path.Combine(partitionDir, tmpName), new byte[]{ 0x01 });
+            File.WriteAllBytes(Path.Combine(partitionDir, tmpName), new byte[] { 0x01 });
             // Create a valid snapshot with smaller version
             var meta = new SnapshotMetadata(partition, 5, DateTimeOffset.UtcNow, 1);
-            using (var ms = new MemoryStream(new byte[]{9,9,9}))
+            using (var ms = new MemoryStream(new byte[] { 9, 9, 9 }))
             {
                 await fs.SaveAsync(meta, ms);
             }
@@ -395,13 +406,13 @@ public class SnapshotsFeatureTests
     [Fact]
     public async Task FinalSnapshotOnShutdown_WritesSnapshot()
     {
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition=64, Partitions=1 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
         var ser = new InMemoryJsonSnapshotSerializer();
         var backend = new InMemorySnapshotStore();
-        var opts = new SnapshotOptions{ Enabled=true, Interval=TimeSpan.FromHours(1), MinEventsBetweenSnapshots=int.MaxValue, FinalSnapshotOnShutdown=true, FinalSnapshotTimeout=TimeSpan.FromSeconds(2) };
+        var opts = new SnapshotOptions { Enabled = true, Interval = TimeSpan.FromHours(1), MinEventsBetweenSnapshots = int.MaxValue, FinalSnapshotOnShutdown = true, FinalSnapshotTimeout = TimeSpan.FromSeconds(2) };
         var snap = store.ConfigureSnapshots(opts, ser, backend);
         var hosted = new SnapshotHostedService(snap);
-        for (int i=0;i<20;i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
+        for (int i = 0; i < 20; i++) store.TryAppend(new Event(new KeyId(1), i, DateTime.UtcNow.Ticks));
         var startCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
         await hosted.StartAsync(startCts.Token); // loop won't trigger due to high interval
         await hosted.StopAsync(CancellationToken.None); // should force final snapshot
@@ -414,7 +425,7 @@ public class SnapshotsFeatureTests
     {
         var partitions = 3;
         var capacity = 128;
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition = capacity, Partitions = partitions });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = capacity, Partitions = partitions });
         var ser = new InMemoryJsonSnapshotSerializer();
         var backend = new InMemorySnapshotStore();
         var snap = store.ConfigureSnapshots(new SnapshotOptions
@@ -449,14 +460,13 @@ public class SnapshotsFeatureTests
                 }
             }
         }
-        Assert.True(any, "Nenhuma partição com snapshot bem sucedido para validar métricas.");
-    }
+        Assert.True(any, "No partition with successful snapshot to validate metrics.");    }
 
     [Fact]
     public async Task StableCaptureFailures_AreCounted()
     {
         // Force high contention + very low StableCaptureMaxAttempts so some captures may fail; if none fail we don't hard-fail test (environment dependent) but assert counters accessible.
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition = 64, Partitions = 4 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 4 });
         var ser = new InMemoryJsonSnapshotSerializer();
         var backend = new InMemorySnapshotStore();
         var snap = store.ConfigureSnapshots(new SnapshotOptions
@@ -502,7 +512,7 @@ public class SnapshotsFeatureTests
             ActivityStopped = _ => { }
         };
         ActivitySource.AddActivityListener(listener);
-        var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition = 64, Partitions = 1 });
+        var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
         var ser = new InMemoryJsonSnapshotSerializer();
         var backend = new InMemorySnapshotStore();
         var snap = store.ConfigureSnapshots(new SnapshotOptions
@@ -537,7 +547,7 @@ public class SnapshotsFeatureTests
         Directory.CreateDirectory(tmpDir);
         try
         {
-            var store = new EventStore<Event>(new EventStoreOptions<Event>{ CapacityPerPartition = 64, Partitions = 1 });
+            var store = new EventStore<Event>(new EventStoreOptions<Event> { CapacityPerPartition = 64, Partitions = 1 });
             var ser = new BinarySnapshotSerializer();
             var fs = new FileSystemSnapshotStore(tmpDir);
             var snap = store.ConfigureSnapshots(new SnapshotOptions
@@ -559,7 +569,7 @@ public class SnapshotsFeatureTests
             var saveActs = activities.Where(a => a.OperationName == "snapshot.save").ToList();
             Assert.NotEmpty(saveActs);
             Assert.Contains(saveActs, a => a.Tags.Any(t => t.Key == "outcome" && t.Value == "success"));
-            // Prune tags são melhor-esforço (prune async); se não existirem não falha.
+            // Prune tags are best-effort (async prune); test doesn't fail if they don't exist.       
         }
         finally
         {
@@ -575,7 +585,7 @@ public class SnapshotsFeatureTests
         {
             PartitionKey = "0",
             Version = 42,
-            Events = new[]{ new Event(new KeyId(1), 1.23, 123456789), new Event(new KeyId(2), 9.87, 987654321) },
+            Events = new[] { new Event(new KeyId(1), 1.23, 123456789), new Event(new KeyId(2), 9.87, 987654321) },
             TakenAt = DateTimeOffset.UtcNow,
             SchemaVersion = 1
         };

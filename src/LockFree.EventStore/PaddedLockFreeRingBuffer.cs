@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 
 namespace LockFree.EventStore;
 
@@ -14,19 +13,19 @@ public sealed class PaddedLockFreeRingBuffer<T>
     private readonly T[] _buffer;
     private readonly Action<T>? _onItemDiscarded;
     private PartitionHeader _header;
-    
+
     /// <summary>
     /// Initializes a new instance with the specified capacity and anti-false sharing padding.
     /// </summary>
     public PaddedLockFreeRingBuffer(int capacity, Action<T>? onItemDiscarded = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
-        
+
         _buffer = new T[capacity];
         _onItemDiscarded = onItemDiscarded;
         _header = new PartitionHeader(capacity);
     }
-    
+
     /// <summary>
     /// Total capacity.
     /// </summary>
@@ -55,13 +54,13 @@ public sealed class PaddedLockFreeRingBuffer<T>
     {
         var newTail = Interlocked.Increment(ref _header.Tail);
         var index = (newTail - 1) % Capacity;
-        
+
         // Store the item
         _buffer[index] = item;
-        
+
         // Update count and handle potential overwrite
         _header.UpdateCount();
-        
+
         // Check if we need to advance head (buffer is full)
         var head = Volatile.Read(ref _header.Head);
         if (newTail - head > Capacity)
@@ -73,7 +72,7 @@ public sealed class PaddedLockFreeRingBuffer<T>
                 _header.IncrementEpoch();
             }
         }
-        
+
         return true;
     }
 
@@ -90,35 +89,35 @@ public sealed class PaddedLockFreeRingBuffer<T>
         var batchSize = items.Length;
         var newTail = Interlocked.Add(ref _header.Tail, batchSize);
         var startIndex = newTail - batchSize;
-        
+
         // Store all items
-        for (int i = 0; i < batchSize; i++)
+        for (var i = 0; i < batchSize; i++)
         {
             var index = (startIndex + i) % Capacity;
             _buffer[index] = items[i];
         }
-        
+
         // Update count
         _header.UpdateCount();
-        
+
         // Handle potential overwrites
         var head = Volatile.Read(ref _header.Head);
         var overflow = newTail - head - Capacity;
-        
+
         if (overflow > 0)
         {
             // We've overwritten some items
             var itemsToDiscard = Math.Min((int)overflow, batchSize);
-            
+
             if (_onItemDiscarded != null)
             {
-                for (int i = 0; i < itemsToDiscard; i++)
+                for (var i = 0; i < itemsToDiscard; i++)
                 {
                     var discardIndex = (head + i) % Capacity;
                     _onItemDiscarded(_buffer[discardIndex]);
                 }
             }
-            
+
             // Advance head past discarded items
             var newHead = head + itemsToDiscard;
             if (Interlocked.CompareExchange(ref _header.Head, newHead, head) == head)
@@ -126,7 +125,7 @@ public sealed class PaddedLockFreeRingBuffer<T>
                 _header.IncrementEpoch();
             }
         }
-        
+
         return batchSize;
     }
 
@@ -138,18 +137,18 @@ public sealed class PaddedLockFreeRingBuffer<T>
         var head = Volatile.Read(ref _header.Head);
         var tail = Volatile.Read(ref _header.Tail);
         var count = (int)Math.Min(destination.Length, Math.Min(Capacity, tail - head));
-        
+
         if (count <= 0)
         {
             return 0;
         }
 
-        for (int i = 0; i < count; i++)
+        for (var i = 0; i < count; i++)
         {
             var index = (head + i) % Capacity;
             destination[i] = _buffer[index];
         }
-        
+
         return count;
     }
 
@@ -166,7 +165,7 @@ public sealed class PaddedLockFreeRingBuffer<T>
             if (len > 0)
             {
                 // Process in chunks
-                for (int i = 0; i < len; i += chunkSize)
+                for (var i = 0; i < len; i += chunkSize)
                 {
                     var chunkLen = Math.Min(chunkSize, len - i);
                     processor(buffer.AsSpan(i, chunkLen));
@@ -188,22 +187,22 @@ public sealed class PaddedLockFreeRingBuffer<T>
         var head = Volatile.Read(ref _header.Head);
         var tail = Volatile.Read(ref _header.Tail);
         var count = Math.Min(tail - head, Capacity);
-        
+
         var state = initialState;
         for (long i = 0; i < count; i++)
         {
             var index = (head + i) % Capacity;
             var item = _buffer[index];
-            
-            var result = processor(state, item);
-            state = result.State;
-            
-            if (!result.Continue)
+
+            var (State, Continue) = processor(state, item);
+            state = State;
+
+            if (!Continue)
             {
                 break; // Early termination
             }
         }
-        
+
         finalState = state;
     }
 
@@ -215,19 +214,19 @@ public sealed class PaddedLockFreeRingBuffer<T>
     public PartitionView<T> CreateView(IEventTimestampSelector<T>? timestampSelector = null)
     {
         // Try multiple times to get a consistent snapshot
-        for (int attempt = 0; attempt < 3; attempt++)
+        for (var attempt = 0; attempt < 3; attempt++)
         {
             var epoch1 = Volatile.Read(ref _header.Epoch);
             var head = Volatile.Read(ref _header.Head);
             var tail = Volatile.Read(ref _header.Tail);
             var epoch2 = Volatile.Read(ref _header.Epoch);
-            
+
             if (epoch1 == epoch2)
             {
                 return CreateViewFromRange(head, tail, timestampSelector);
             }
         }
-        
+
         // Fallback: take current snapshot even if not perfectly consistent
         var currentHead = Volatile.Read(ref _header.Head);
         var currentTail = Volatile.Read(ref _header.Tail);
@@ -248,7 +247,7 @@ public sealed class PaddedLockFreeRingBuffer<T>
 
         var headIndex = (int)(head % Capacity);
         var tailIndex = (int)(tail % Capacity);
-        
+
         // Calculate timestamp range if selector is provided
         long fromTicks = 0, toTicks = 0;
         if (timestampSelector != null && count > 0)
@@ -279,21 +278,21 @@ public sealed class PaddedLockFreeRingBuffer<T>
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public PartitionView<T> CreateViewFiltered(
-        long fromTicks, 
-        long toTicks, 
+        long fromTicks,
+        long toTicks,
         IEventTimestampSelector<T> timestampSelector)
     {
         ArgumentNullException.ThrowIfNull(timestampSelector);
-            
+
         const int maxRetries = 10;
-        
-        for (int retry = 0; retry < maxRetries; retry++)
+
+        for (var retry = 0; retry < maxRetries; retry++)
         {
             var startEpoch = Volatile.Read(ref _header.Epoch);
             var head = Volatile.Read(ref _header.Head);
             var tail = Volatile.Read(ref _header.Tail);
             var endEpoch = Volatile.Read(ref _header.Epoch);
-            
+
             if (startEpoch != endEpoch)
             {
                 continue;
@@ -301,7 +300,7 @@ public sealed class PaddedLockFreeRingBuffer<T>
 
             return CreateFilteredViewFromRange(head, tail, fromTicks, toTicks, timestampSelector);
         }
-        
+
         // Fallback
         var currentHead = Volatile.Read(ref _header.Head);
         var currentTail = Volatile.Read(ref _header.Tail);
@@ -310,10 +309,10 @@ public sealed class PaddedLockFreeRingBuffer<T>
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private PartitionView<T> CreateFilteredViewFromRange(
-        long head, 
-        long tail, 
-        long fromTicks, 
-        long toTicks, 
+        long head,
+        long tail,
+        long fromTicks,
+        long toTicks,
         IEventTimestampSelector<T> timestampSelector)
     {
         var totalCount = (int)Math.Min(Math.Min(tail - head, Capacity), int.MaxValue);
@@ -324,17 +323,17 @@ public sealed class PaddedLockFreeRingBuffer<T>
                 ReadOnlyMemory<T>.Empty,
                 0, fromTicks, toTicks);
         }
-        
+
         // Find the range of valid events
         int validStart = -1, validEnd = -1;
-        int validCount = 0;
-        
-        for (int i = 0; i < totalCount; i++)
+        var validCount = 0;
+
+        for (var i = 0; i < totalCount; i++)
         {
             var index = (int)((head + i) % Capacity);
             var item = _buffer[index];
             var itemTicks = timestampSelector.GetTimestamp(item).Ticks;
-            
+
             if (itemTicks >= fromTicks && itemTicks <= toTicks)
             {
                 if (validStart == -1)
@@ -346,7 +345,7 @@ public sealed class PaddedLockFreeRingBuffer<T>
                 validCount++;
             }
         }
-        
+
         if (validCount == 0)
         {
             return new PartitionView<T>(
@@ -354,11 +353,11 @@ public sealed class PaddedLockFreeRingBuffer<T>
                 ReadOnlyMemory<T>.Empty,
                 0, fromTicks, toTicks);
         }
-        
+
         // Create view for the valid range
         var actualStartIndex = (int)((head + validStart) % Capacity);
         var actualEndIndex = (int)((head + validEnd) % Capacity);
-        
+
         if (actualStartIndex <= actualEndIndex)
         {
             // Single segment
@@ -371,10 +370,10 @@ public sealed class PaddedLockFreeRingBuffer<T>
             // Wrap-around case
             var firstSegmentLength = Capacity - actualStartIndex;
             var secondSegmentLength = actualEndIndex + 1;
-            
+
             var segment1 = new ReadOnlyMemory<T>(_buffer, actualStartIndex, firstSegmentLength);
             var segment2 = new ReadOnlyMemory<T>(_buffer, 0, secondSegmentLength);
-            
+
             return new PartitionView<T>(segment1, segment2, validCount, fromTicks, toTicks);
         }
     }
@@ -399,7 +398,7 @@ public sealed class PaddedLockFreeRingBuffer<T>
         var tail = Volatile.Read(ref _header.Tail);
         var epoch = Volatile.Read(ref _header.Epoch);
         var count = _header.GetApproximateCount();
-        
+
         return (head, tail, epoch, count);
     }
 
@@ -411,7 +410,7 @@ public sealed class PaddedLockFreeRingBuffer<T>
         var tmp = new T[Capacity];
         var len = Snapshot(tmp);
         var results = new List<T>(len);
-        for (int i = 0; i < len; i++)
+        for (var i = 0; i < len; i++)
         {
             results.Add(tmp[i]);
         }
@@ -425,26 +424,30 @@ public sealed class PaddedLockFreeRingBuffer<T>
         const int maxAttempts = 8;
         for (var attempt = 0; attempt < maxAttempts; attempt++)
         {
+            // Read head/tail with attempt to ensure both are stable for the duration of copy
             var head1 = Volatile.Read(ref _header.Head);
-            var tail = Volatile.Read(ref _header.Tail);
+            var tail1 = Volatile.Read(ref _header.Tail);
             var head2 = Volatile.Read(ref _header.Head);
             if (head1 != head2)
             {
-                continue;
+                continue; // head moved, retry
             }
-            var capacity = Capacity;
-            var available = tail - head1;
+            // Fast path: empty
+            var available = tail1 - head1;
             if (available <= 0)
             {
-                items = Array.Empty<T>();
+                items = [];
                 version = 0;
                 return true;
             }
+            var capacity = Capacity;
             var count = (int)Math.Min(available, capacity);
             var start = head1;
             var end = start + count;
             var headIndex = (int)(start % capacity);
             var buffer = new T[count];
+
+            // Copy in one or two segments
             if (headIndex + count <= capacity)
             {
                 Array.Copy(_buffer, headIndex, buffer, 0, count);
@@ -456,11 +459,19 @@ public sealed class PaddedLockFreeRingBuffer<T>
                 Array.Copy(_buffer, headIndex, buffer, 0, first);
                 Array.Copy(_buffer, 0, buffer, first, second);
             }
-            items = buffer;
-            version = end;
-            return true;
+
+            // Verify stability AFTER copy: neither head nor tail changed (prevents tail advancing mid-copy)
+            var tail2 = Volatile.Read(ref _header.Tail);
+            var head3 = Volatile.Read(ref _header.Head);
+            if (head1 == head3 && tail1 == tail2)
+            {
+                items = buffer;
+                version = end; // version corresponds to tail at time of snapshot
+                return true;
+            }
+            // else retry
         }
-        items = Array.Empty<T>();
+        items = [];
         version = 0;
         return false;
     }

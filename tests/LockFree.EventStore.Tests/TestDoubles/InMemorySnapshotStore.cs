@@ -59,9 +59,12 @@ internal sealed class InMemorySnapshotStore : ISnapshotStore
         if (!_data.TryGetValue(partitionKey, out var list)) return ValueTask.CompletedTask;
         lock (list)
         {
-            if (list.Count > snapshotsToKeep)
+            // Clamp snapshotsToKeep to non-negative and compute bounded removal count
+            snapshotsToKeep = Math.Max(0, snapshotsToKeep);
+            var remove = Math.Max(0, list.Count - snapshotsToKeep);
+            if (remove > 0)
             {
-                var remove = list.Count - snapshotsToKeep;
+                if (remove > list.Count) remove = list.Count; // extra safety
                 list.RemoveRange(0, remove);
             }
         }

@@ -26,8 +26,9 @@ public sealed partial class EventStore<TEvent>
     private PaddedLong _snapshotBytesExposed;
     private PaddedLong _windowAdvanceCount;
 
-    private Snapshotter? _snapshotterRef; // will be set externally when snapshot feature is used
-    private bool _snapConfigured; // track snapshot configuration
+    private Snapshotter? _snapshotterRef; // published via Volatile.Read/Write for safe publication
+    private volatile bool _snapConfigured; // guarded by _snapshotInitLock for configuration, volatile for visibility after init
+    private readonly object _snapshotInitLock = new();
 
     /// <summary>
     /// Initializes a new instance with default options.
@@ -251,7 +252,9 @@ public sealed partial class EventStore<TEvent>
 
         if (typeof(TEvent) == typeof(Event))
         {
-            _snapshotterRef?.NotifyAppended(delta);
+            // Single volatile read then null-check to avoid race with concurrent detach
+            var snap = Volatile.Read(ref _snapshotterRef);
+            snap?.NotifyAppended(delta);
         }
 
         // Update public statistics (single path for append accounting)
@@ -1904,7 +1907,8 @@ public sealed partial class EventStore<TEvent>
 
     internal void AttachSnapshotter(object snapshotter)
     {
-        _snapshotterRef = snapshotter as Snapshotter;
+        // Publish snapshotter reference with a release memory barrier to ensure visibility across threads.
+        Volatile.Write(ref _snapshotterRef, snapshotter as Snapshotter);
     }
 
     internal bool TryGetStableView(string partitionKey, out PartitionState snapshot)
@@ -2022,15 +2026,18 @@ public sealed partial class EventStore<TEvent>
         {
             throw new InvalidOperationException("Snapshot subsystem only supported when TEvent is Event.");
         }
-        if (_snapConfigured)
+        lock (_snapshotInitLock)
         {
-            throw new InvalidOperationException("Snapshots already configured for this store instance.");
+            if (_snapConfigured)
+            {
+                throw new InvalidOperationException("Snapshots already configured for this store instance.");
+            }
+            SnapshotValidation.ValidateSnapshotOptions(options, serializer, store);
+            var snap = new Snapshotter(Unsafe.As<EventStore<Event>>(this), options, serializer, store, logger, deltaWriter, backoff);
+            AttachSnapshotter(snap);
+            _snapConfigured = true; // publish after successful creation
+            return snap;
         }
-        SnapshotValidation.ValidateSnapshotOptions(options, serializer, store);
-        var snap = new Snapshotter(Unsafe.As<EventStore<Event>>(this), options, serializer, store, logger, deltaWriter, backoff);
-        AttachSnapshotter(snap);
-        _snapConfigured = true;
-        return snap;
     }
 
     /// <summary>
@@ -2038,11 +2045,7 @@ public sealed partial class EventStore<TEvent>
     /// </summary>
     public Task<int> RestoreFromSnapshotsAsync(CancellationToken ct = default)
     {
-        if (!_snapConfigured || _snapshotterRef is null)
-        {
-            return Task.FromResult(0);
-        }
-        return _snapshotterRef.RestoreFromSnapshotsAsync(ct);
+        return !_snapConfigured || _snapshotterRef is null ? Task.FromResult(0) : _snapshotterRef.RestoreFromSnapshotsAsync(ct);
     }
 
     /// <summary>

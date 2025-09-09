@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.IO;
-using System.Threading.Tasks;
 using System.Diagnostics;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -13,13 +12,13 @@ namespace LockFree.EventStore.Snapshots;
 public sealed class Snapshotter : IDisposable
 {
     private readonly EventStore<Event> _store;
-    private readonly SnapshotOptions _options;
     private readonly ISnapshotSerializer _serializer;
     private readonly ISnapshotStore _storeBackend;
     private readonly IBackoffPolicy _backoff;
     private readonly ILogger? _logger;
     private readonly ConcurrentQueue<string> _jobQueue = new();
     private readonly SemaphoreSlim _concurrency;
+    private readonly ConcurrentDictionary<Task, byte> _runningJobs = new(); // track in-flight snapshot jobs for graceful shutdown
     private long _lastSnapshotTicks;
     private long _eventsSinceLast;
     private readonly ActivitySource? _activity;
@@ -33,6 +32,7 @@ public sealed class Snapshotter : IDisposable
     private static readonly Action<ILogger, int, Exception> _logSaveFailed = LoggerMessage.Define<int>(LogLevel.Error, new EventId(1003, nameof(Snapshotter) + ":SaveFailed"), "Snapshot save failed after {Attempts} attempts");
     private static readonly Action<ILogger, int, Exception?> _logJobDropped = LoggerMessage.Define<int>(LogLevel.Debug, new EventId(1004, nameof(Snapshotter) + ":JobDropped"), "Snapshot job dropped (pending queue size reached limit {Limit})");
     private static readonly Action<ILogger, string, Exception?> _logStableFail = LoggerMessage.Define<string>(LogLevel.Debug, new EventId(1005, nameof(Snapshotter) + ":StableCaptureFailed"), "Stable view capture failed for partition {Partition} (will retry later)");
+    private static readonly Action<ILogger, string, Exception?> _logPruneFailed = LoggerMessage.Define<string>(LogLevel.Warning, new EventId(1006, nameof(Snapshotter) + ":PruneFailed"), "Snapshot pruning failed for partition {Partition}");
 
     private sealed class PartitionSnapshotInternal
     {
@@ -70,7 +70,7 @@ public sealed class Snapshotter : IDisposable
     public Snapshotter(EventStore<Event> store, SnapshotOptions options, ISnapshotSerializer serializer, ISnapshotStore snapshotStore, ILogger? logger = null, IEventDeltaWriter? deltaWriter = null, IBackoffPolicy? backoff = null)
     {
         _store = store;
-        _options = options;
+        Options = options;
         _serializer = serializer;
         _storeBackend = snapshotStore;
         _logger = logger;
@@ -84,7 +84,7 @@ public sealed class Snapshotter : IDisposable
     /// <summary>Increment internal event counter when new events appended.</summary>
     public void NotifyAppended(int count)
     {
-        if (!_options.Enabled)
+        if (!Options.Enabled)
         {
             return;
         }
@@ -94,7 +94,7 @@ public sealed class Snapshotter : IDisposable
     /// <summary>Main background loop evaluating triggers and dispatching jobs.</summary>
     public async Task RunAsync(CancellationToken ct)
     {
-        if (!_options.Enabled)
+        if (!Options.Enabled)
         {
             return;
         }
@@ -103,13 +103,18 @@ public sealed class Snapshotter : IDisposable
             try
             {
                 var elapsed = (Stopwatch.GetTimestamp() - Volatile.Read(ref _lastSnapshotTicks)) / (double)Stopwatch.Frequency;
-                var intervalReached = elapsed >= _options.Interval.TotalSeconds;
-                var eventsReached = Volatile.Read(ref _eventsSinceLast) >= _options.MinEventsBetweenSnapshots;
+                var intervalReached = elapsed >= Options.Interval.TotalSeconds;
+                var eventCount = Interlocked.Exchange(ref _eventsSinceLast, 0);
+                var eventsReached = eventCount >= Options.MinEventsBetweenSnapshots;
                 if (intervalReached || eventsReached)
                 {
                     EnqueueAllPartitions();
-                    _ = Interlocked.Exchange(ref _eventsSinceLast, 0);
                     _ = Interlocked.Exchange(ref _lastSnapshotTicks, Stopwatch.GetTimestamp());
+                }
+                else if (eventCount > 0)
+                {
+                    // Restore the count if we didn't trigger
+                    _ = Interlocked.Add(ref _eventsSinceLast, eventCount);
                 }
                 await ProcessQueueAsync(ct).ConfigureAwait(false);
                 await Task.Delay(250, ct).ConfigureAwait(false);
@@ -146,27 +151,51 @@ public sealed class Snapshotter : IDisposable
 
     internal async Task DrainQueueForShutdownAsync(CancellationToken ct)
     {
-        await ProcessQueueAsync(ct).ConfigureAwait(false);
-        // Wait for all in-flight tasks by acquiring all semaphore slots
-        for (var i = 0; i < _options.MaxConcurrentSnapshotJobs; i++)
+        // Continuously process queue until empty and all running jobs finish.
+        while (true)
         {
-            await _concurrency.WaitAsync(ct).ConfigureAwait(false);
-        }
-        // Release them back
-        for (var i = 0; i < _options.MaxConcurrentSnapshotJobs; i++)
-        {
-            _ = _concurrency.Release();
+            await ProcessQueueAsync(ct).ConfigureAwait(false);
+
+            if (!_jobQueue.IsEmpty)
+            {
+                // More items enqueued while processing; loop again.
+                continue;
+            }
+
+            // Materialize task list safely
+            var taskList = new List<Task>(_runningJobs.Count);
+            foreach (var kvp in _runningJobs)
+            {
+                taskList.Add(kvp.Key);
+            }
+            if (taskList.Count == 0)
+            {
+                break; // nothing running
+            }
+            try
+            {
+                await Task.WhenAll(taskList).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Ignore individual job failures here; they were already logged in ExecuteJobAsync.
+            }
+            // Loop again in case new tasks slipped in between snapshot and await.
+            if (_jobQueue.IsEmpty && _runningJobs.IsEmpty)
+            {
+                break;
+            }
         }
     }
 
     private void TryEnqueueJob(string key)
     {
-        if (_jobQueue.Count >= _options.MaxPendingSnapshotJobs)
+        if (_jobQueue.Count >= Options.MaxPendingSnapshotJobs)
         {
             _ = Interlocked.Increment(ref _droppedJobs);
             if (_logger != null)
             {
-                _logJobDropped(_logger, _options.MaxPendingSnapshotJobs, null);
+                _logJobDropped(_logger, Options.MaxPendingSnapshotJobs, null);
             }
             return;
         }
@@ -178,7 +207,8 @@ public sealed class Snapshotter : IDisposable
         while (_jobQueue.TryDequeue(out var key))
         {
             await _concurrency.WaitAsync(ct).ConfigureAwait(false);
-            _ = Task.Run(async () =>
+            Task? jobTask = null;
+            jobTask = Task.Run(async () =>
             {
                 try
                 {
@@ -187,8 +217,13 @@ public sealed class Snapshotter : IDisposable
                 finally
                 {
                     _ = _concurrency.Release();
+                    if (jobTask != null)
+                    {
+                        _ = _runningJobs.TryRemove(jobTask, out _); // discard bool result
+                    }
                 }
             }, ct);
+            _ = _runningJobs.TryAdd(jobTask, 0); // discard bool result
         }
     }
 
@@ -226,7 +261,25 @@ public sealed class Snapshotter : IDisposable
                 ms.Position = 0;
                 var meta = new SnapshotMetadata(partitionKey, state.Version, state.TakenAt, state.SchemaVersion);
                 await _storeBackend.SaveAsync(meta, ms, ct).ConfigureAwait(false);
-                _ = Task.Run(() => _storeBackend.PruneAsync(partitionKey, _options.SnapshotsToKeep));
+                // Run pruning asynchronously with error handling & cancellation awareness
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _storeBackend.PruneAsync(partitionKey, Options.SnapshotsToKeep, ct).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        // Cancellation expected during shutdown; swallow silently
+                    }
+                    catch (Exception ex)
+                    {
+                        if (_logger != null)
+                        {
+                            _logPruneFailed(_logger, partitionKey, ex);
+                        }
+                    }
+                }, ct);
                 _ = act?.AddTag("partition", partitionKey);
                 _ = act?.AddTag("version", state.Version);
                 _ = act?.AddTag("bytes", ms.Length);
@@ -247,7 +300,7 @@ public sealed class Snapshotter : IDisposable
                 }
                 return;
             }
-            catch (Exception ex) when (attempt < _options.MaxSaveAttempts && !ct.IsCancellationRequested)
+            catch (Exception ex) when (attempt < Options.MaxSaveAttempts && !ct.IsCancellationRequested)
             {
                 var delay = _backoff.NextDelay(attempt);
                 if (_logger != null)
@@ -289,7 +342,11 @@ public sealed class Snapshotter : IDisposable
             long headVersion = 0;
             long buffered = 0;
             // Partition keys are numeric indices; sample live head & buffered via store internals.
-            if (int.TryParse(kvp.Key, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var idx))
+            // before: NumberStyles.None
+            if (int.TryParse(kvp.Key,
+                            System.Globalization.NumberStyles.Integer,
+                             System.Globalization.CultureInfo.InvariantCulture,
+                             out var idx))
             {
                 // Attempt a lightweight stable copy to read current version without materializing events when possible.
                 if (_store.TryGetStableView(kvp.Key, out var state))
@@ -312,7 +369,7 @@ public sealed class Snapshotter : IDisposable
     /// <summary>Restores in-memory partitions from latest persisted snapshots (best-effort).</summary>
     public async Task<int> RestoreFromSnapshotsAsync(CancellationToken ct = default)
     {
-        if (!_options.Enabled)
+        if (!Options.Enabled)
         {
             return 0; // feature off, nothing to restore
         }
@@ -339,17 +396,17 @@ public sealed class Snapshotter : IDisposable
                 continue; // skip corrupted snapshot
             }
             // Fail-fast schema enforcement when ExpectedSchemaVersion specified
-            if (_options.ExpectedSchemaVersion.HasValue && state.SchemaVersion != _options.ExpectedSchemaVersion.Value)
+            if (Options.ExpectedSchemaVersion.HasValue && state.SchemaVersion != Options.ExpectedSchemaVersion.Value)
             {
-                throw new InvalidOperationException($"Snapshot schema mismatch. Expected={_options.ExpectedSchemaVersion.Value} Actual={state.SchemaVersion} Partition={state.PartitionKey}");
+                throw new InvalidOperationException($"Snapshot schema mismatch. Expected={Options.ExpectedSchemaVersion.Value} Actual={state.SchemaVersion} Partition={state.PartitionKey}");
             }
             // Legacy tolerant path (no expected schema) keeps ignoring non-1 versions for now
-            if (!_options.ExpectedSchemaVersion.HasValue && state.SchemaVersion != 1)
+            if (!Options.ExpectedSchemaVersion.HasValue && state.SchemaVersion != 1)
             {
                 continue;
             }
             // Partition key must be integer index
-            if (!int.TryParse(state.PartitionKey, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var p))
+            if (!int.TryParse(state.PartitionKey, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var p))
             {
                 continue;
             }
@@ -367,7 +424,7 @@ public sealed class Snapshotter : IDisposable
         _concurrency.Dispose();
     }
 
-    internal SnapshotOptions Options => _options;
+    internal SnapshotOptions Options { get; }
 }
 
 /// <summary>

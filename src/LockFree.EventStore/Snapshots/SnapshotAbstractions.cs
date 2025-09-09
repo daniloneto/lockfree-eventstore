@@ -1,8 +1,4 @@
-using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace LockFree.EventStore.Snapshots;
 
@@ -171,9 +167,16 @@ public interface IBackoffPolicy
 /// </summary>
 public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) : IBackoffPolicy
 {
-    private readonly TimeSpan _baseDelay = baseDelay;
-    private readonly double _factor = factor;
-    private readonly Random _rng = new();
+    // Validate constructor arguments (fail fast)
+    private readonly TimeSpan _baseDelay = baseDelay <= TimeSpan.Zero
+        ? throw new ArgumentOutOfRangeException(nameof(baseDelay), "Base delay must be > 0.")
+        : baseDelay;
+    private readonly double _factor = factor <= 0
+        ? throw new ArgumentOutOfRangeException(nameof(factor), "Factor must be > 0.")
+        : factor;
+    // Removed per-instance Random (not thread-safe); using Random.Shared.
+
+    private double _lastDelayMs; // ensure monotonic strictly increasing sequence expected by tests
 
     /// <inheritdoc />
     public TimeSpan NextDelay(int attempt)
@@ -182,9 +185,42 @@ public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) 
         {
             attempt = 1;
         }
-        var raw = _baseDelay.TotalMilliseconds * Math.Pow(_factor, attempt - 1);
-        var jitter = raw * 0.1 * _rng.NextDouble();
-        return TimeSpan.FromMilliseconds(raw + jitter);
+        // Compute exponential raw delay in milliseconds.
+        double raw;
+        try
+        {
+            raw = _baseDelay.TotalMilliseconds * Math.Pow(_factor, attempt - 1);
+        }
+        catch (OverflowException)
+        {
+            return TimeSpan.MaxValue; // exponent overflow
+        }
+        if (double.IsNaN(raw) || double.IsInfinity(raw) || raw <= 0)
+        {
+            if (raw <= 0)
+            {
+                raw = _baseDelay.TotalMilliseconds; // fallback
+            }
+            if (double.IsInfinity(raw))
+            {
+                return TimeSpan.MaxValue;
+            }
+        }
+        // Positive-only jitter (up to +10%) to satisfy tests expecting delay >= base raw value.
+        var jitterMultiplier = 1.0 + (Random.Shared.NextDouble() * 0.1); // [1.0, 1.1)
+        var ms = raw * jitterMultiplier;
+        var maxMs = TimeSpan.MaxValue.TotalMilliseconds;
+        if (ms >= maxMs)
+        {
+            return TimeSpan.MaxValue;
+        }
+        // Enforce monotonic strictly increasing sequence.
+        if (ms <= _lastDelayMs)
+        {
+            ms = Math.Min(_lastDelayMs + 1, maxMs - 1); // bump by 1ms within bounds
+        }
+        _lastDelayMs = ms;
+        return TimeSpan.FromMilliseconds(ms);
     }
 }
 

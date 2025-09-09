@@ -1,33 +1,68 @@
-using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 
 namespace LockFree.EventStore.Snapshots;
 
 /// <summary>
 /// File-system snapshot store using atomic write-temp + rename and pruning.
 /// </summary>
-public sealed class FileSystemSnapshotStore : ISnapshotStore
+public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made partial to support GeneratedRegex
 {
     private readonly string _root;
     private readonly bool _fsyncDir;
+    // Removed compiled Regex field in favor of source-generated regex for performance & no startup cost.
+    [GeneratedRegex("^[A-Za-z0-9_-]+$", RegexOptions.CultureInvariant)]
+    private static partial Regex AllowedPartitionKeyRegex();
 
     /// <summary>Create store rooted at directory (created if absent).</summary>
     public FileSystemSnapshotStore(string rootDirectory, bool fsyncDirectory = false, IBackoffPolicy? backoff = null)
     {
         _root = rootDirectory ?? throw new ArgumentNullException(nameof(rootDirectory));
-        Directory.CreateDirectory(_root);
+        _ = Directory.CreateDirectory(_root);
         _fsyncDir = fsyncDirectory;
         _ = backoff; // reserved future use
     }
 
     private static string PartitionDir(string root, string partitionKey)
     {
-        return Path.Combine(root, partitionKey);
+        // Validate partitionKey to avoid path traversal or invalid names.
+        if (string.IsNullOrWhiteSpace(partitionKey))
+        {
+            throw new ArgumentException("Partition key must be non-empty", nameof(partitionKey));
+        }
+        if (Path.IsPathRooted(partitionKey))
+        {
+            throw new UnauthorizedAccessException("Rooted partition keys are not allowed");
+        }
+        if (partitionKey.Contains("..", StringComparison.Ordinal))
+        {
+            throw new UnauthorizedAccessException("Partition key must not contain '..'");
+        }
+        if (partitionKey.Contains(Path.DirectorySeparatorChar) || partitionKey.Contains(Path.AltDirectorySeparatorChar))
+        {
+            throw new UnauthorizedAccessException("Partition key must not contain directory separators");
+        }
+        if (partitionKey.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            throw new ArgumentException("Partition key contains invalid characters", nameof(partitionKey));
+        }
+        if (!AllowedPartitionKeyRegex().IsMatch(partitionKey))
+        {
+            throw new ArgumentException("Partition key contains disallowed characters", nameof(partitionKey));
+        }
+
+        var rootFull = Path.GetFullPath(root);
+        if (!rootFull.EndsWith(Path.DirectorySeparatorChar))
+        {
+            rootFull += Path.DirectorySeparatorChar;
+        }
+        var combined = Path.GetFullPath(Path.Combine(rootFull, partitionKey));
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return !combined.StartsWith(rootFull, comparison)
+            ? throw new UnauthorizedAccessException("Partition key resolves outside the snapshot root")
+            : combined;
     }
 
     private static string TempFile(string dir, string fileName)
@@ -39,7 +74,7 @@ public sealed class FileSystemSnapshotStore : ISnapshotStore
     public async ValueTask SaveAsync(SnapshotMetadata meta, Stream data, CancellationToken ct = default)
     {
         var dir = PartitionDir(_root, meta.PartitionKey);
-        Directory.CreateDirectory(dir);
+        _ = Directory.CreateDirectory(dir);
         var finalName = $"{meta.PartitionKey}_{meta.Version}_{meta.TakenAt.UtcTicks}.snap";
         var finalPath = Path.Combine(dir, finalName);
         var tmpPath = TempFile(dir, finalName);
@@ -50,7 +85,26 @@ public sealed class FileSystemSnapshotStore : ISnapshotStore
             await fs.FlushAsync(ct).ConfigureAwait(false);
             fs.Flush(flushToDisk: true);
         }
-        File.Move(tmpPath, finalPath, overwrite: false);
+        // Attempt atomic move; on failure, ensure temp file is removed so future writes can succeed.
+        try
+        {
+            File.Move(tmpPath, finalPath, overwrite: false);
+        }
+        catch
+        {
+            try
+            {
+                if (File.Exists(tmpPath))
+                {
+                    File.Delete(tmpPath);
+                }
+            }
+            catch
+            {
+                // ignore cleanup failure
+            }
+            throw; // propagate original failure
+        }
         if (_fsyncDir)
         {
             TryFsyncDirectory(dir);
@@ -97,7 +151,8 @@ public sealed class FileSystemSnapshotStore : ISnapshotStore
             return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>(null);
         }
         var stream = new FileStream(bestPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>( (bestMeta.Value, stream) );
+        var result = (bestMeta.Value, (Stream)stream);
+        return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>(result);
     }
 
     /// <inheritdoc />
@@ -114,29 +169,61 @@ public sealed class FileSystemSnapshotStore : ISnapshotStore
     /// <inheritdoc />
     public async ValueTask PruneAsync(string partitionKey, int snapshotsToKeep, CancellationToken ct = default)
     {
-        if (snapshotsToKeep < 1) return;
+        if (snapshotsToKeep < 1)
+        {
+            return;
+        }
         var dir = PartitionDir(_root, partitionKey);
-        if (!Directory.Exists(dir)) return;
+        if (!Directory.Exists(dir))
+        {
+            return;
+        }
         var entries = new List<(FileInfo File, long Version, long Ticks)>();
         foreach (var path in Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly))
         {
             ct.ThrowIfCancellationRequested();
-            if (path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) continue; // ignore temp
-            if (!path.EndsWith(".snap", StringComparison.OrdinalIgnoreCase)) continue; // ignore other files
+            if (path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
+            {
+                continue; // ignore temp
+            }
+            if (!path.EndsWith(".snap", StringComparison.OrdinalIgnoreCase))
+            {
+                continue; // ignore other files
+            }
             var name = Path.GetFileNameWithoutExtension(path);
             var parts = name.Split('_');
-            if (parts.Length < 3) continue;
-            if (!long.TryParse(parts[^2], out var version)) continue;
-            if (!long.TryParse(parts[^1], out var ticks)) continue;
+            if (parts.Length < 3)
+            {
+                continue;
+            }
+            if (!long.TryParse(parts[^2], out var version))
+            {
+                continue;
+            }
+            if (!long.TryParse(parts[^1], out var ticks))
+            {
+                continue;
+            }
             entries.Add((new FileInfo(path), version, ticks));
         }
-        if (entries.Count <= snapshotsToKeep) return;
+        if (entries.Count <= snapshotsToKeep)
+        {
+            return;
+        }
         var ordered = entries.OrderByDescending(e => e.Version).ThenByDescending(e => e.Ticks).ToList();
         var toDelete = ordered.Skip(snapshotsToKeep).ToList();
         var deleted = 0;
         foreach (var e in toDelete)
         {
-            try { e.File.Delete(); deleted++; } catch { /* ignore */ }
+            try
+            {
+                e.File.Delete();
+                deleted++;
+            }
+            catch
+            {
+                // ignore
+            }
         }
         // Trace pruning if there is an active snapshot Activity
         var act = System.Diagnostics.Activity.Current;
