@@ -342,9 +342,8 @@ public sealed class Snapshotter : IDisposable
             long headVersion = 0;
             long buffered = 0;
             // Partition keys are numeric indices; sample live head & buffered via store internals.
-            // before: NumberStyles.None
             if (int.TryParse(kvp.Key,
-                            System.Globalization.NumberStyles.Integer,
+                            System.Globalization.NumberStyles.None,
                              System.Globalization.CultureInfo.InvariantCulture,
                              out var idx))
             {
@@ -406,7 +405,7 @@ public sealed class Snapshotter : IDisposable
                 continue;
             }
             // Partition key must be integer index
-            if (!int.TryParse(state.PartitionKey, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var p))
+            if (!int.TryParse(state.PartitionKey, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var p))
             {
                 continue;
             }

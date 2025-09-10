@@ -12,6 +12,7 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
 {
     private readonly string _root;
     private readonly bool _fsyncDir;
+    private static long _tempCounter; // monotonic counter for uniqueness
     // Removed compiled Regex field in favor of source-generated regex for performance & no startup cost.
     [GeneratedRegex("^[A-Za-z0-9_-]+$", RegexOptions.CultureInvariant)]
     private static partial Regex AllowedPartitionKeyRegex();
@@ -65,9 +66,15 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
             : combined;
     }
 
-    private static string TempFile(string dir, string fileName)
+    private static string NewTempPath(string dir, string finalName)
     {
-        return Path.Combine(dir, fileName + ".tmp");
+        // finalName itself already validated via partition key and construction.
+        var ticks = DateTime.UtcNow.Ticks;
+        var ctr = Interlocked.Increment(ref _tempCounter);
+        var pid = Environment.ProcessId;
+        var guid = Guid.NewGuid().ToString("N");
+        // Pattern keeps characters filesystem-friendly and unique: <final>.wip.<pid>.<ctr>.<ticks>.<guid>.tmp
+        return Path.Combine(dir, $"{finalName}.wip.{pid}.{ctr}.{ticks}.{guid}.tmp");
     }
 
     /// <inheritdoc />
@@ -77,37 +84,60 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
         _ = Directory.CreateDirectory(dir);
         var finalName = $"{meta.PartitionKey}_{meta.Version}_{meta.TakenAt.UtcTicks}.snap";
         var finalPath = Path.Combine(dir, finalName);
-        var tmpPath = TempFile(dir, finalName);
+        var tmpPath = NewTempPath(dir, finalName); // unique per attempt
 
-        using (var fs = new FileStream(tmpPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.WriteThrough))
-        {
-            await data.CopyToAsync(fs, ct).ConfigureAwait(false);
-            await fs.FlushAsync(ct).ConfigureAwait(false);
-            fs.Flush(flushToDisk: true);
-        }
-        // Attempt atomic move; on failure, ensure temp file is removed so future writes can succeed.
+        FileStream? fs = null;
+        var moved = false;
         try
         {
-            File.Move(tmpPath, finalPath, overwrite: false);
-        }
-        catch
-        {
+            fs = new FileStream(tmpPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.WriteThrough);
             try
             {
-                if (File.Exists(tmpPath))
-                {
-                    File.Delete(tmpPath);
-                }
+                await data.CopyToAsync(fs, ct).ConfigureAwait(false);
+                await fs.FlushAsync(ct).ConfigureAwait(false);
+                fs.Flush(flushToDisk: true);
             }
-            catch
+            finally
             {
-                // ignore cleanup failure
+                // Ensure the handle is closed before attempting the atomic move.
+                fs.Dispose();
+                fs = null;
             }
-            throw; // propagate original failure
+
+            // Verify temp file still exists (defensive, should always be true)
+            if (!File.Exists(tmpPath))
+            {
+                throw new IOException($"Temporary snapshot file '{tmpPath}' disappeared before move.");
+            }
+
+            // Attempt atomic move into place (no overwrite to preserve first writer and surface races)
+            File.Move(tmpPath, finalPath, overwrite: false);
+            moved = true;
+
+            if (_fsyncDir)
+            {
+                TryFsyncDirectory(dir);
+            }
         }
-        if (_fsyncDir)
+        finally
         {
-            TryFsyncDirectory(dir);
+            // Best-effort cleanup on any failure path (including exceptions & cancellation)
+            if (!moved)
+            {
+                try
+                {
+                    fs?.Dispose();
+                }
+                catch { /* ignore */ }
+                try
+                {
+                    if (File.Exists(tmpPath))
+                    {
+                        File.Delete(tmpPath);
+                    }
+                }
+                catch { /* ignore cleanup errors */ }
+            }
         }
     }
 

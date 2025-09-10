@@ -208,10 +208,10 @@ Internally `TryGetStableView(partitionKey, out PartitionState state)` performs a
 #### Atomic Save Protocol
 1. Serialize to a temporary file: `<partition>_<version>_<ticks>.snap.tmp`
 2. Flush & (where available) use WriteThrough / Flush(true)
-3. Atomic rename to final: `.snap` (same volume)
+3. Atomic rename to final: `.snap` (same volume) via `File.Move(temp, final, overwrite:false)`. A collision (target already exists) is treated as a logic/corruption anomaly and the move throws (fail-fast) instead of silently overwriting an existing snapshot.
 4. Prune old snapshots asynchronously (best-effort; errors do not affect hot path)
 
-Temporary `.tmp` files are ignored during load.
+Temporary `.tmp` files are ignored during load. Stray/unknown non-`.snap` files are also skipped both on restore and pruning to avoid interfering with normal operation.
 
 #### Retry & Backoff
 Transient I/O failures trigger exponential backoff:

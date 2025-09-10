@@ -381,6 +381,12 @@ var restored = await store.RestoreFromSnapshotsAsync();
 - Sem `ExpectedSchemaVersion`, snapshots com `SchemaVersion != 1` são ignorados silenciosamente (modo tolerante legado).
 
 ### Atomicidade no FileSystem
+`FileSystemSnapshotStore` grava em `*.snap.tmp` e depois `File.Move(temp, final, overwrite:false)`. O move (rename) é atômico e NÃO sobrescreve um snapshot final existente: uma colisão indica condição inesperada/corrupção lógica e deve resultar em exceção (fail‑fast) ao invés de ocultar o problema. Assim, snapshots visíveis são sempre completos. Arquivos `.tmp` pendentes (parciais) ou arquivos desconhecidos são ignorados tanto na restauração quanto no pruning.
+
+### Política de pruning
+Mantém os `N` mais recentes segundo ordenação: `Version DESC`, depois `TakenAt DESC`. Isso garante que em caso de versões duplicadas (mesmo valor lógico) fica a mais nova no tempo.
+
+### Atomicidade no FileSystem
 `FileSystemSnapshotStore` grava em `*.snap.tmp` e depois `File.Move(temp, final, overwrite:true)` garantindo que snapshots visíveis são sempre completos. Arquivos `.tmp` ou desconhecidos são ignorados na carga e pruning.
 
 ### Política de pruning

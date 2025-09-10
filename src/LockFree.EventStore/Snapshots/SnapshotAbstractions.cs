@@ -176,7 +176,7 @@ public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) 
         : factor;
     // Removed per-instance Random (not thread-safe); using Random.Shared.
 
-    private double _lastDelayMs; // ensure monotonic strictly increasing sequence expected by tests
+    private double _lastDelayMs; // updated atomically via CAS loop to preserve monotonicity
 
     /// <inheritdoc />
     public TimeSpan NextDelay(int attempt)
@@ -185,7 +185,6 @@ public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) 
         {
             attempt = 1;
         }
-        // Compute exponential raw delay in milliseconds.
         double raw;
         try
         {
@@ -206,7 +205,6 @@ public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) 
                 return TimeSpan.MaxValue;
             }
         }
-        // Positive-only jitter (up to +10%) to satisfy tests expecting delay >= base raw value.
         var jitterMultiplier = 1.0 + (Random.Shared.NextDouble() * 0.1); // [1.0, 1.1)
         var ms = raw * jitterMultiplier;
         var maxMs = TimeSpan.MaxValue.TotalMilliseconds;
@@ -214,12 +212,19 @@ public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) 
         {
             return TimeSpan.MaxValue;
         }
-        // Enforce monotonic strictly increasing sequence.
-        if (ms <= _lastDelayMs)
+        // Lock-free monotonic update (CAS loop)
+        while (true)
         {
-            ms = Math.Min(_lastDelayMs + 1, maxMs - 1); // bump by 1ms within bounds
+            var observed = Volatile.Read(ref _lastDelayMs);
+            var candidate = ms <= observed ? Math.Min(observed + 1, maxMs - 1) : ms;
+            var original = Interlocked.CompareExchange(ref _lastDelayMs, candidate, observed);
+            if (original == observed)
+            {
+                ms = candidate;
+                break;
+            }
+            // else retry with updated observed and same ms (raw)
         }
-        _lastDelayMs = ms;
         return TimeSpan.FromMilliseconds(ms);
     }
 }
