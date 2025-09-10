@@ -60,18 +60,10 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
             var up = trimmed.ToUpperInvariant();
             static bool IsDevice(string u)
             {
-                if (u is "CON" or "PRN" or "AUX" or "NUL")
-                {
-                    return true;
-                }
-                if (u.Length == 4 && char.IsDigit(u[3]) && u[3] != '0')
-                {
-                    if (u.StartsWith("COM", StringComparison.Ordinal) || u.StartsWith("LPT", StringComparison.Ordinal))
-                    {
-                        return true;
-                    }
-                }
-                return false;
+                // Merged nested if into single condition chain
+                return u is "CON" or "PRN" or "AUX" or "NUL" ||
+                       (u.Length == 4 && u[3] is >= '1' and <= '9' &&
+                        (u.StartsWith("COM", StringComparison.Ordinal) || u.StartsWith("LPT", StringComparison.Ordinal)));
             }
             if (IsDevice(up))
             {

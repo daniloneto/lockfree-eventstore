@@ -52,7 +52,7 @@ public sealed class BinarySnapshotSerializer(bool compress = false) : ISnapshotS
         if (gzip != null)
         {
             await gzip.FlushAsync(ct).ConfigureAwait(false); // ensures trailer written
-            gzip.Dispose(); // finish compression (leaveOpen: true keeps destination open)
+            await gzip.DisposeAsync().ConfigureAwait(false); // finish compression asynchronously (leaveOpen: true keeps destination open)
         }
         await destination.FlushAsync(ct).ConfigureAwait(false);
     }
