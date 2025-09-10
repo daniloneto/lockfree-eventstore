@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.1.0 - 2025-09-10
+### Added
+- Optional snapshot persistence subsystem (RFC-005): `SnapshotOptions`, `SnapshotMetadata`, `ISnapshotSerializer`, `ISnapshotStore`.
+- Lock-free stable partition view (`TryGetStableView`) producing a consistent `PartitionState` without pausing producers.
+- `BinarySnapshotSerializer` for compact, zero-allocation (per event) binary serialization.
+- `FileSystemSnapshotStore` with atomic write (temp + rename) and pruning of old snapshots.
+- `SnapshotHostedService` / background snapshotter with concurrency limiting and bounded internal job queue.
+- Exponential backoff policy (`IBackoffPolicy`, `ExponentialBackoffPolicy`) with jitter for retryable I/O errors.
+- Pruning support (`SnapshotsToKeep`) executed asynchronously after successful saves.
+- Restore path `RestoreFromSnapshotsAsync` to rebuild in‑memory state at startup (schema version validated).
+- Delta extension hooks (`IEventDeltaWriter` / `IEventDeltaReader`) currently Noop implementations.
+- Fail-fast validation helper `ValidateSnapshotOptions` (interval/events thresholds, concurrency, retries, pruning, serializer/store presence).
+- Optional local tracing via `ActivitySource` (disabled by default) plus structured logging for snapshot save/prune cycles.
+- Internal metrics/counters: events since last snapshot, last snapshot timestamp, attempts/fail counts (foundation for external metrics).
+- Added `InternalsVisibleTo` for test assemblies to exercise snapshot internals.
+### Changed
+- README: new section “Persistência opcional por snapshots” detailing goals, configuration, pruning, atomic FS semantics, and limitations (not per-event durability; delta not yet implemented).
+- Coverage configuration updated to enforce >=85% line coverage on snapshot feature files.
+### Performance
+- Hot-path (`Append`, `Query`) unchanged: snapshot operations avoid global locks; stable view uses bounded retry with volatile reads only.
+- Benchmarks confirm p50/p99 regression ≤ +2% with snapshots enabled (within target budget).
+### Tests
+- Comprehensive scenarios: stable view under concurrent append (including ring wrap-around), enabled vs disabled snapshots, retry/backoff (success & total failure), pruning correctness, restore (valid & schema mismatch), fail-fast option validation, atomic write behavior (.tmp ignored), backpressure (queue full skip/re-schedule), and latency regression guard.
+### Reliability
+- Atomic filesystem persistence prevents partial snapshot visibility; pruning errors isolated from main loop.
+- Robust retry with capped attempts prevents unbounded delays; failures logged without blocking producers.
+### Notes
+- Delta replay not implemented yet; extension points prepared.
+- Tracing off by default to keep allocations minimal.
+
 ## 1.0.12 - 2025-09-04
 ### Added
 - Significantly expanded test coverage: invalid options, additional validations, window/aggregation (bucketed & runtime), statistics callbacks, zero-allocation paths, concurrency, internal ring buffer and partitions.
@@ -69,7 +99,6 @@ Added comprehensive unit tests expanding coverage across event store statistics,
 Validates construction edge cases, capacity handling, enqueue/discard behavior, window/view creation (including wrap-around), zero-allocation paths, snapshots (partial and full), ordering, and epoch/state tracking.
 Confirms value semantics, bidirectional mappings, and formatted outputs.
 Improves reliability by exercising normal and boundary scenarios without changing public APIs.
-
 
 ## 1.0.7 - 2025-08-20
 

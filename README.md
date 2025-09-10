@@ -312,7 +312,6 @@ Projetado para alta concorrência e baixa latência. A ordem global entre parti�
 ## Limitações
 - Ordem global apenas aproximada entre partições
 - Capacidade fixa; eventos antigos são descartados ao exceder
-- Sem persistência
 
 ## Persistência opcional por snapshots (RFC005)
 A partir da RFC005 o `EventStore<Event>` pode ser configurado para **persistir snapshots por partição** de forma opcional, sem penalizar a latência de append quando o recurso está ocioso.
@@ -455,6 +454,68 @@ if (restored > 0 && store.TryGetSnapshotMetrics(out var metrics))
 - `InvalidOperationException` ao configurar duas vezes: cada instância só suporta um snapshotter.
 - `ArgumentOutOfRangeException` em validação: revise limites mínimos (`MaxSaveAttempts >=1`, etc.).
 - Falha de schema: defina `ExpectedSchemaVersion` somente quando a versão de serialização estiver definitivamente estável.
+
+### Exemplos de Snapshots
+Dois projetos de exemplo demonstram o uso prático do subsistema de snapshots persistentes:
+
+#### 1. SnapshotSensors (Console)
+Workload sintético de sensores (temperatura + umidade) em alta frequência demonstrando:
+- Warm start: restaura o ring buffer a partir dos snapshots mais recentes no boot
+- Capturas periódicas (gatilho de tempo + contagem de eventos)
+- Snapshot final gracioso no shutdown (`FinalSnapshotOnShutdown=true`)
+- Escrita atômica (`.snap.tmp` → rename para `.snap`)
+- Pruning mantendo somente os N últimos por partição
+- Métricas impressas periodicamente (Append, Dropped, SnapshotBytes, DroppedJobs, StableFailures)
+
+Executar:
+```bash
+dotnet run --project samples/SnapshotSensors/SnapshotSensors.csproj
+```
+Interrompa (Ctrl+C), execute novamente e observe a linha:
+```
+[BOOT] Partitions restauradas de snapshot: X
+```
+Se X > 0 houve warm start.
+
+Principais parâmetros (Program.cs):
+- Interval = 5s
+- MinEventsBetweenSnapshots = 100.000
+- SnapshotsToKeep = 3
+- FinalSnapshotOnShutdown = true (timeout 3s)
+- Compressão habilitada (`BinarySnapshotSerializer(compress: true)`)
+
+#### 2. SnapshotSensorsApi (Minimal API)
+API HTTP que recebe leituras JSON e expõe estado e métricas:
+- POST /sensor → gera dois eventos (temperatura chave=1, umidade chave=2) distribuídos por partições
+- GET /state → agregados (min/max/avg/count) + contadores aproximados
+- GET /metrics → métricas internas + snapshot metrics
+- Restauração antes de iniciar o processamento (`RestoreFromSnapshotsAsync`)
+- Snapshotter em background + impressão periódica
+
+Executar:
+```bash
+dotnet run --project samples/SnapshotSensorsApi/SnapshotSensorsApi.csproj
+```
+Enviar leitura:
+```bash
+curl -X POST http://localhost:5000/sensor \
+  -H "Content-Type: application/json" \
+  -d '{"deviceId":"dev-1","temperature":22.5,"humidity":48.2}'
+```
+Consultar estado/métricas:
+```bash
+curl http://localhost:5000/state
+curl http://localhost:5000/metrics
+```
+Configuração principal (Program.cs):
+- Interval = 10s
+- MinEventsBetweenSnapshots = 50.000
+- MaxConcurrentSnapshotJobs = max(2, partitions/4)
+- SnapshotsToKeep = 3
+- FinalSnapshotOnShutdown = true (timeout 5s)
+- Compressão habilitada
+
+Ambos os exemplos evidenciam que o snapshot não bloqueia appends e que arquivos parciais nunca aparecem (renome atômico). Ajuste `Interval`, `MinEventsBetweenSnapshots` ou habilite `fsyncDirectory` (Unix) para explorar trade-offs.
 
 ## Licença
 MIT

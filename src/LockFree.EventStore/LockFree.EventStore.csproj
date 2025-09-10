@@ -1,14 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
-    <Version>1.0.12</Version>
+    <Version>1.1.0</Version>
     <Description>Event store em memória lock-free, genérico, com capacidade fixa, particionado e agregações funcionais.</Description>
     <PackageId>LockFree.EventStore</PackageId>
     <Authors>Danilo Neto</Authors>
     <PackageTags>dotnet;eventstore;lock-free;concurrency;in-memory;partitioning;aot;trimming</PackageTags>
     <RepositoryUrl>https://github.com/daniloneto/lockfree-eventstore</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageReleaseNotes>v1.0.12: Strengthened validation (InvalidOperationException), internal refactors (ring buffer, partitioners), unified 'var' usage, large test expansion (builder, options edge cases, runtime and bucketed windows, zero-allocation paths, concurrency). v1.0.11: MetricsDashboard tests and integration improvements, script enhancements (UTC timestamps, metrics, error handling), sample fixes, aggregation refinements. v1.0.10: Removed obsolete code/tests (legacy optimized partition/padding/specialized duplicates) reducing complexity and build/test time. v1.0.9: Runtime window tracking option, bucketed window aggregation, early options validation, additional zero-allocation optimizations (snapshot/query/aggregation), padded counters to reduce false sharing, README revision.</PackageReleaseNotes>
+    <PackageReleaseNotes>v1.1.0: RFC-005 optional persistent snapshots: lock-free stable partition view (TryGetStableView), BinarySnapshotSerializer, FileSystemSnapshotStore with atomic temp+rename writes and pruning (SnapshotsToKeep), SnapshotHostedService with bounded queue and MaxConcurrentSnapshotJobs, exponential backoff retry (IBackoffPolicy/ExponentialBackoffPolicy), restore path (RestoreFromSnapshotsAsync) with schema validation, fail-fast option validation (ValidateSnapshotOptions), optional local tracing via ActivitySource (disabled by default), Noop delta hooks, greater than 85% coverage tests (stable view concurrency/wrap-around, retry/backoff success and failure, pruning accuracy, restore, fail-fast, atomic write ignoring .tmp, backpressure, latency regression ≤ +2%). Hot path (Append/Query) unchanged (≤ +2% p50/p99). v1.0.12: Strengthened validation (InvalidOperationException), internal refactors (ring buffer, partitioners), unified 'var' usage, large test expansion (builder, options edge cases, runtime and bucketed windows, zero-allocation paths, concurrency). v1.0.11-1.0.9: MetricsDashboard tests, script enhancements (UTC), window tracking and bucketed aggregation, early option validation, zero-allocation optimizations, padded counters.</PackageReleaseNotes>
     <Copyright>Copyright (c) 2025 Danilo Neto</Copyright>
     <IncludeSymbols>true</IncludeSymbols>    
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
