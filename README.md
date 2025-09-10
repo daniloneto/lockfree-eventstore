@@ -312,7 +312,216 @@ Projetado para alta concorrência e baixa latência. A ordem global entre parti�
 ## Limitações
 - Ordem global apenas aproximada entre partições
 - Capacidade fixa; eventos antigos são descartados ao exceder
-- Sem persistência
+
+## Persistência opcional por snapshots (RFC005)
+A partir da RFC005 o `EventStore<Event>` pode ser configurado para **persistir snapshots por partição** de forma opcional, sem penalizar a latência de append quando o recurso está ocioso.
+
+### Objetivos
+- Captura estável não bloqueante de cada partição (tentativas limitadas)
+- Gravação atômica em disco (`temp` + `rename`)
+- Retry com backoff exponencial e contabilização de falhas
+- Pruning determinístico (ordenação por `Version` desc depois `TakenAt` desc)
+- Restauração rápida na inicialização (fail‑fast se `ExpectedSchemaVersion` definido)
+- Métricas enriquecidas por partição (incluindo `HeadVersion` e `CurrentBuffered`)
+- Passo final opcional de snapshot em desligamento gracioso
+- Tracing local opcional via `ActivitySource`
+
+### Quando usar
+Use quando quiser durabilidade eventual / recuperação rápida em restart, mantendo o hot path de escrita lock‑free em memória. Não substitui um event log completo – é um checkpoint periódico.
+
+### Configuração básica
+```csharp
+var store = new EventStore<Event>(new EventStoreOptions<Event>
+{
+    CapacityPerPartition = 1024,
+    Partitions = 8
+});
+
+var snapshots = store.ConfigureSnapshots(
+    new SnapshotOptions
+    {
+        Enabled = true,
+        Interval = TimeSpan.FromSeconds(10),      // gatilho temporal
+        MinEventsBetweenSnapshots = 5_000,        // gatilho por volume
+        SnapshotsToKeep = 3,                      // retenção por partição
+        MaxConcurrentSnapshotJobs = 2,
+        MaxPendingSnapshotJobs = 64,
+        MaxSaveAttempts = 5,
+        BackoffBaseDelay = TimeSpan.FromMilliseconds(100),
+        BackoffFactor = 2.0,
+        StableCaptureMaxAttempts = 8,
+        FinalSnapshotOnShutdown = true,
+        FinalSnapshotTimeout = TimeSpan.FromSeconds(5),
+        EnableLocalTracing = true // gera Activity "snapshot.save"
+    },
+    serializer: new BinarySnapshotSerializer(),
+    store: new FileSystemSnapshotStore("./snapshots")
+);
+```
+
+### Execução em background
+Você pode usar o hosted service pronto:
+```csharp
+var hosted = new SnapshotHostedService(snapshots);
+await hosted.StartAsync(ct);
+// ... aplicação roda ...
+await hosted.StopAsync(CancellationToken.None); // dispara passagem final se configurado
+```
+Ou acionar manualmente:
+```csharp
+await snapshots.RunAsync(ct); // laço cooperativo respeitando o CancellationToken
+```
+
+### Restauração
+```csharp
+var restored = await store.RestoreFromSnapshotsAsync();
+// retorna número de partições restauradas
+```
+- Se `ExpectedSchemaVersion` estiver definido e houver divergência: lança `InvalidOperationException` (fail‑fast).
+- Sem `ExpectedSchemaVersion`, snapshots com `SchemaVersion != 1` são ignorados silenciosamente (modo tolerante legado).
+
+### Atomicidade no FileSystem
+`FileSystemSnapshotStore` grava em `*.snap.tmp` e depois `File.Move(temp, final, overwrite:false)`. O move (rename) é atômico e NÃO sobrescreve um snapshot final existente: uma colisão indica condição inesperada/corrupção lógica e deve resultar em exceção (fail‑fast) ao invés de ocultar o problema. Assim, snapshots visíveis são sempre completos. Arquivos `.tmp` pendentes (parciais) ou arquivos desconhecidos são ignorados tanto na restauração quanto no pruning.
+
+### Política de pruning
+Mantém os `N` mais recentes segundo ordenação: `Version DESC`, depois `TakenAt DESC`. Isso garante que em caso de versões duplicadas (mesmo valor lógico) fica a mais nova no tempo.
+
+### Atomicidade no FileSystem
+`FileSystemSnapshotStore` grava em `*.snap.tmp` e depois `File.Move(temp, final, overwrite:true)` garantindo que snapshots visíveis são sempre completos. Arquivos `.tmp` ou desconhecidos são ignorados na carga e pruning.
+
+### Política de pruning
+Mantém os `N` mais recentes segundo ordenação: `Version DESC`, depois `TakenAt DESC`. Isso garante que em caso de versões duplicadas (mesmo valor lógico) fica a mais nova no tempo.
+
+### Métricas
+```csharp
+if (store.TryGetSnapshotMetrics(out var m))
+{
+    foreach (var p in m.Partitions)
+    {
+        Console.WriteLine($"Partição={p.PartitionKey} LastVersion={p.LastVersion} HeadVersion={p.HeadVersion} Buffered={p.CurrentBuffered}");
+    }
+    Console.WriteLine($"DroppedJobs={m.DroppedJobs} StableCaptureFailures={m.StableCaptureFailures}");
+}
+```
+Campos principais em `PartitionSnapshotInfo`:
+- `LastVersion`: versão persistida do último snapshot salvo
+- `HeadVersion`: versão lógica viva (aprox.) no momento da coleta de métricas
+- `EventsSinceLastSnapshot`: delta de versão entre snapshots salvos
+- `CurrentBuffered`: quantidade aproximada de eventos atualmente no buffer da partição
+- `StableCaptureFailedCount`: quantas vezes a captura estável falhou (contensão)
+
+Invariantes esperadas:
+- `HeadVersion >= LastVersion`
+- `0 <= CurrentBuffered <= CapacityPerPartition`
+
+### Tracing
+Quando `EnableLocalTracing = true` é ativado, cada persistência gera uma Activity (`snapshot.save`) com tags:
+- `partition`
+- `version`
+- `bytes`
+- `attempts`
+- `outcome` (`success` | `failure` | `stable-capture-failed`)
+- `error` (quando falha definitiva)
+E dentro do mesmo contexto é emitido um evento `snapshot.prune` (quando pruning ocorre) com tags:
+- `prune.partition`
+- `prune.deleted`
+- `prune.kept`
+Falhas de captura estável incrementam métricas (`StableCaptureFailures`). Futuras extensões podem adicionar spans adicionais.
+
+### Performance & Overhead
+- Nenhuma degradação perceptível no hot path quando o recurso está habilitado mas ocioso (meta: regressão < 2% de latência de append p50/p99). Teste de regressão incluso.
+- Captura estável tenta até `StableCaptureMaxAttempts`; se falhar, contabiliza e reprograma (evita backpressure a produtores).
+- Trabalho de serialização/IO é offloaded para tasks paralelas com limite `MaxConcurrentSnapshotJobs` e fila limitada (`MaxPendingSnapshotJobs`). Excesso resulta em `DroppedJobs`.
+
+### Estratégias de tuning
+| Objetivo | Ajuste | Efeito |
+|----------|--------|--------|
+| Reduzir frequência | Aumentar `Interval` e/ou `MinEventsBetweenSnapshots` | Menos IO e CPU, snapshots mais distantes |
+| Menos contenção | Aumentar `StableCaptureMaxAttempts` | Maior chance de captura estável sob escrita intensa |
+| Menos latência de gravação | Reduzir `MaxConcurrentSnapshotJobs` | Menos threads de IO simultâneas |
+| Garantir último estado no shutdown | `FinalSnapshotOnShutdown=true` | Passagem final bloqueante dentro do timeout |
+
+### Limitações atuais
+- Apenas tipo `Event` suporta snapshots (generic constraint lógica)
+- Deltas incrementais ainda não implementados (`IEventDeltaWriter`/`Reader` placeholders)
+- `CompactBeforeSnapshot` reservado (não usado)
+
+### Exemplo de verificação pós‑restore
+```csharp
+var restored = await store.RestoreFromSnapshotsAsync();
+if (restored > 0 && store.TryGetSnapshotMetrics(out var metrics))
+{
+    foreach (var p in metrics.Partitions)
+        Debug.Assert(p.HeadVersion >= p.LastVersion);
+}
+```
+
+### Erros comuns
+- `InvalidOperationException` ao configurar duas vezes: cada instância só suporta um snapshotter.
+- `ArgumentOutOfRangeException` em validação: revise limites mínimos (`MaxSaveAttempts >=1`, etc.).
+- Falha de schema: defina `ExpectedSchemaVersion` somente quando a versão de serialização estiver definitivamente estável.
+
+### Exemplos de Snapshots
+Dois projetos de exemplo demonstram o uso prático do subsistema de snapshots persistentes:
+
+#### 1. SnapshotSensors (Console)
+Workload sintético de sensores (temperatura + umidade) em alta frequência demonstrando:
+- Warm start: restaura o ring buffer a partir dos snapshots mais recentes no boot
+- Capturas periódicas (gatilho de tempo + contagem de eventos)
+- Snapshot final gracioso no shutdown (`FinalSnapshotOnShutdown=true`)
+- Escrita atômica (`.snap.tmp` → rename para `.snap`)
+- Pruning mantendo somente os N últimos por partição
+- Métricas impressas periodicamente (Append, Dropped, SnapshotBytes, DroppedJobs, StableFailures)
+
+Executar:
+```bash
+dotnet run --project samples/SnapshotSensors/SnapshotSensors.csproj
+```
+Interrompa (Ctrl+C), execute novamente e observe a linha:
+```
+[BOOT] Partitions restauradas de snapshot: X
+```
+Se X > 0 houve warm start.
+
+Principais parâmetros (Program.cs):
+- Interval = 5s
+- MinEventsBetweenSnapshots = 100.000
+- SnapshotsToKeep = 3
+- FinalSnapshotOnShutdown = true (timeout 3s)
+- Compressão habilitada (`BinarySnapshotSerializer(compress: true)`)
+
+#### 2. SnapshotSensorsApi (Minimal API)
+API HTTP que recebe leituras JSON e expõe estado e métricas:
+- POST /sensor → gera dois eventos (temperatura chave=1, umidade chave=2) distribuídos por partições
+- GET /state → agregados (min/max/avg/count) + contadores aproximados
+- GET /metrics → métricas internas + snapshot metrics
+- Restauração antes de iniciar o processamento (`RestoreFromSnapshotsAsync`)
+- Snapshotter em background + impressão periódica
+
+Executar:
+```bash
+dotnet run --project samples/SnapshotSensorsApi/SnapshotSensorsApi.csproj
+```
+Enviar leitura:
+```bash
+curl -X POST http://localhost:5000/sensor \
+  -H "Content-Type: application/json" \
+  -d '{"deviceId":"dev-1","temperature":22.5,"humidity":48.2}'
+```
+Consultar estado/métricas:
+```bash
+curl http://localhost:5000/state
+curl http://localhost:5000/metrics
+```
+Configuração principal (Program.cs):
+- Interval = 10s
+- MinEventsBetweenSnapshots = 50.000
+- MaxConcurrentSnapshotJobs = max(2, partitions/4)
+- SnapshotsToKeep = 3
+- FinalSnapshotOnShutdown = true (timeout 5s)
+- Compressão habilitada
+
+Ambos os exemplos evidenciam que o snapshot não bloqueia appends e que arquivos parciais nunca aparecem (renome atômico). Ajuste `Interval`, `MinEventsBetweenSnapshots` ou habilite `fsyncDirectory` (Unix) para explorar trade-offs.
 
 ## Licença
 MIT

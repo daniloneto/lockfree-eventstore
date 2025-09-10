@@ -529,6 +529,53 @@ public sealed class LockFreeRingBuffer<T>
 
         finalState = state;
     }
+
+    // Added: internal stable copy helper for snapshot subsystem (RFC005)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool TryCopyStable(out T[] items, out long version)
+    {
+        const int maxAttempts = 8;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var head1 = Volatile.Read(ref _head);
+            var tail = Volatile.Read(ref _tail);
+            var head2 = Volatile.Read(ref _head);
+            if (head1 != head2)
+            {
+                continue; // contention, retry
+            }
+            var capacity = Capacity;
+            var available = tail - head1;
+            if (available <= 0)
+            {
+                items = Array.Empty<T>();
+                version = 0;
+                return true;
+            }
+            var count = (int)Math.Min(available, capacity); // truncate if wrapped past capacity
+            var start = head1;
+            var end = start + count; // logical version up to captured range (not full tail if truncated)
+            var headIndex = (int)(start % capacity);
+            var buffer = new T[count];
+            if (headIndex + count <= capacity)
+            {
+                Array.Copy(_buffer, headIndex, buffer, 0, count);
+            }
+            else
+            {
+                var first = capacity - headIndex;
+                var second = count - first;
+                Array.Copy(_buffer, headIndex, buffer, 0, first);
+                Array.Copy(_buffer, 0, buffer, first, second);
+            }
+            items = buffer;
+            version = end;
+            return true;
+        }
+        items = Array.Empty<T>();
+        version = 0;
+        return false;
+    }
 }
 
 /// <summary>

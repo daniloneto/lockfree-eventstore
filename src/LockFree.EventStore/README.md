@@ -162,23 +162,153 @@ var filteredSum = store.Sum(
 
 Note: Time-filtered queries require `EnableWindowTracking = true`. When disabled, a clear InvalidOperationException is thrown: "Window tracking is disabled. EnableWindowTracking must be true to use window queries."
 
-## Snapshots with Filters
+## Snapshots
+`Snapshot()` returns an approximate immutable copy of the current state of all partitions, ordered from the oldest to the newest event per partition.
+
+### Persistent Snapshots (RFC-005)
+Adds an optional persistence layer that periodically saves partition states to disk without impacting the hot append/query path.
+
+Key goals:
+- Lock-free stable partition view creation (no global locks, producer never blocked)
+- Atomic filesystem writes (temp file + rename) to avoid partial/corrupted snapshots
+- Fast startup via `RestoreFromSnapshotsAsync()` (warm memory reconstruction)
+- Bounded retry with exponential backoff for transient I/O failures
+- Pruning of older snapshots keeping only the most recent N
+- Fail-fast validation of snapshot configuration
+- Optional lightweight local tracing (disabled by default)
+- Hooks prepared for future delta replay (not implemented yet)
+
+#### Configuration
 ```csharp
-// Filtered snapshot
-var eventosRecentes = store.Snapshot(
-    filter: evt => evt.Timestamp > DateTime.UtcNow.AddMinutes(-5)
+var store = new EventStore<Event>(new EventStoreOptions<Event>
+{
+    // existing core options
+    CapacityPerPartition = 1_000_000,
+    Partitions = Environment.ProcessorCount,
+    EnableFalseSharingProtection = true
+});
+
+// Configure snapshot subsystem (one-time)
+var snapshotter = store.ConfigureSnapshots(
+    new SnapshotOptions
+    {
+        Enabled = true,
+        Interval = TimeSpan.FromMinutes(2),            // Time-based trigger (can be combined with MinEventsBetweenSnapshots)
+        MinEventsBetweenSnapshots = 50_000,            // Event-count trigger
+        MaxConcurrentSnapshotJobs = 2,                 // Limit concurrent save jobs
+        SnapshotsToKeep = 3,                           // Pruning window
+        MaxSaveAttempts = 5,                           // Retry attempts for transient errors
+        BackoffBaseDelay = TimeSpan.FromMilliseconds(100),
+        BackoffFactor = 2.0,
+        CompactBeforeSnapshot = true,                  // (Future compaction hook)
+        EnableLocalTracing = false                     // Enables ActivitySource if true
+    },
+    serializer: new BinarySnapshotSerializer(),
+    store: new FileSystemSnapshotStore("snapshots")
 );
 
-// Snapshot by time window
-var snapshot = store.Snapshot(from: inicio, to: fim);
-
-// Snapshot with filter and time window
-var filtrado = store.Snapshot(
-    filter: evt => evt.Valor > 100,
-    from: inicio,
-    to: fim
-);
+await store.RestoreFromSnapshotsAsync(); // Rebuild in-memory state before serving traffic
 ```
+
+#### Stable View Extraction
+Internally `TryGetStableView(partitionKey, out PartitionState state)` performs a double-read of head counters (HeadVersion → HeadIndex → HeadVersion) with bounded retries to obtain a coherent cut, copying the ring into a contiguous buffer (handling wrap-around with at most two spans) without allocating per event.
+
+#### Atomic Save Protocol
+1. Serialize to a temporary file: `<partition>_<version>_<ticks>.snap.tmp`
+2. Flush & (where available) use WriteThrough / Flush(true)
+3. Atomic rename to final: `.snap` (same volume) via `File.Move(temp, final, overwrite:false)`. A collision (target already exists) is treated as a logic/corruption anomaly and the move throws (fail-fast) instead of silently overwriting an existing snapshot.
+4. Prune old snapshots asynchronously (best-effort; errors do not affect hot path)
+
+Temporary `.tmp` files are ignored during load. Stray/unknown non-`.snap` files are also skipped both on restore and pruning to avoid interfering with normal operation.
+
+#### Retry & Backoff
+Transient I/O failures trigger exponential backoff:
+```
+nextDelay = baseDelay * factor^(attempt-1) + small jitter
+```
+Stops after `MaxSaveAttempts`. Failures are logged; producers remain unaffected.
+
+#### Pruning
+After a successful save, the N newest snapshots (by version/timestamp) are retained; older ones are deleted. Failures during pruning are logged and skipped.
+
+#### Restore
+`RestoreFromSnapshotsAsync()` enumerates partitions via the snapshot store, loads the most recent `.snap` for each, validates schema version, and reconstructs the in-memory ring state. Delta replay hooks exist but are inactive.
+
+#### Tracing & Metrics
+- Optional `ActivitySource` emits: `snapshot.save` (partition, version, bytes, attempts, success) and `snapshot.prune` (kept, deleted)
+- Internal counters track: head version per partition, events since last snapshot, last snapshot timestamp, failed attempts
+
+#### Performance Impact
+Measured p50 / p99 append latency regression ≤ +2% with snapshots enabled under benchmark load, staying within target budget. The stable view logic uses only volatile reads and bounded retries; no global locks are introduced.
+
+#### Limitations & Notes
+- Not a durability guarantee per individual event
+- Delta / incremental replay not yet implemented (future extension)
+- Tracing disabled by default to avoid extra allocations
+- Requires explicit enabling (`SnapshotOptions.Enabled = true`)
+
+### Snapshot Samples
+Two focused samples demonstrate the snapshot subsystem:
+
+#### 1. SnapshotSensors (Console)
+High-frequency synthetic sensor workload (temperature + humidity) showing:
+- Warm start (restores ring buffers from latest snapshots on boot)
+- Periodic snapshots (time + event count triggers)
+- Graceful shutdown producing a final snapshot
+- Atomic write path (temporary .tmp then rename to .snap)
+- Pruning (keeps only the last N versions)
+- Snapshot + store metrics printed every 10s
+
+Run:
+```bash
+dotnet run --project samples/SnapshotSensors/SnapshotSensors.csproj
+```
+Stop (Ctrl+C) and run again; look for:
+```
+[BOOT] Partitions restauradas de snapshot: X
+```
+If X > 0 the state was warm-started.
+
+Key configuration (Program.cs):
+- Interval = 5s
+- MinEventsBetweenSnapshots = 100_000
+- SnapshotsToKeep = 3
+- FinalSnapshotOnShutdown = true (timeout 3s)
+- Compression enabled (`BinarySnapshotSerializer(compress: true)`)
+
+#### 2. SnapshotSensorsApi (Minimal API)
+HTTP API receiving JSON sensor readings:
+- POST /sensor (deviceId, temperature, humidity, timestampUtc?) → appends two events (temp/humidity) distributed across partitions
+- GET /state → aggregated min/max/avg/count per metric + approximate totals
+- GET /metrics → internal event store + snapshot subsystem metrics
+- Warm start using `RestoreFromSnapshotsAsync()` before serving requests
+- Background snapshotter + periodic metrics printing
+
+Run:
+```bash
+dotnet run --project samples/SnapshotSensorsApi/SnapshotSensorsApi.csproj
+```
+Send readings:
+```bash
+curl -X POST http://localhost:5000/sensor \
+  -H "Content-Type: application/json" \
+  -d '{"deviceId":"dev-1","temperature":22.5,"humidity":48.2}'
+```
+Inspect state/metrics:
+```bash
+curl http://localhost:5000/state
+curl http://localhost:5000/metrics
+```
+
+Snapshot config (Program.cs):
+- Interval = 10s
+- MinEventsBetweenSnapshots = 50_000
+- MaxConcurrentSnapshotJobs = max(2, partitions/4)
+- SnapshotsToKeep = 3
+- FinalSnapshotOnShutdown = true (timeout 5s)
+- Compression enabled
+
+Both samples showcase that snapshot persistence does not block high-frequency appends and that partial files are never observed (atomic rename). Adjust `Interval`, `MinEventsBetweenSnapshots`, or enable directory fsync (Unix) to explore durability vs performance.
 
 ## Cleanup and Maintenance
 ```csharp

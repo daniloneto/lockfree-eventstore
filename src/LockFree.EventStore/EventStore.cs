@@ -1,13 +1,15 @@
 using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using LockFree.EventStore.Snapshots;
 
 namespace LockFree.EventStore;
 
 /// <summary>
 /// In-memory partitioned event store using lock-free ring buffers.
 /// </summary>
-public sealed class EventStore<TEvent>
+public sealed partial class EventStore<TEvent>
 {
     private readonly LockFreeRingBuffer<TEvent>[]? _partitions;
     private readonly PaddedLockFreeRingBuffer<TEvent>[]? _paddedPartitions;
@@ -23,6 +25,10 @@ public sealed class EventStore<TEvent>
     private PaddedLong _droppedCount;
     private PaddedLong _snapshotBytesExposed;
     private PaddedLong _windowAdvanceCount;
+
+    private Snapshotter? _snapshotterRef; // published via Volatile.Read/Write for safe publication
+    private bool _snapConfigured; // accessed under _snapshotInitLock or via Volatile.Read/Write for publication
+    private readonly Lock _snapshotInitLock = new();
 
     /// <summary>
     /// Initializes a new instance with default options.
@@ -243,6 +249,13 @@ public sealed class EventStore<TEvent>
 
         // Update internal counter
         var newCount = Interlocked.Add(ref _appendCount.Value, delta);
+
+        if (typeof(TEvent) == typeof(Event))
+        {
+            // Single volatile read then null-check to avoid race with concurrent detach
+            var snap = Volatile.Read(ref _snapshotterRef);
+            snap?.NotifyAppended(delta);
+        }
 
         // Update public statistics (single path for append accounting)
         if (delta == 1)
@@ -1889,6 +1902,161 @@ public sealed class EventStore<TEvent>
                 return false;
             }
         }
+        return true;
+    }
+
+    internal void AttachSnapshotter(object snapshotter)
+    {
+        // Publish snapshotter reference with a release memory barrier to ensure visibility across threads.
+        Volatile.Write(ref _snapshotterRef, snapshotter as Snapshotter);
+    }
+
+    internal bool TryGetStableView(string partitionKey, out PartitionState snapshot)
+    {
+        snapshot = default!;
+        if (typeof(TEvent) != typeof(Event)) { return false; } // feature only active for Event
+        var partitionCount = GetPartitionCount();
+        if (partitionCount <= 0) { return false; }
+        if (!int.TryParse(partitionKey, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var p) || (uint)p >= (uint)partitionCount)
+        {
+            return false;
+        }
+        var maxAttempts = Math.Max(1, _snapshotterRef?.Options.StableCaptureMaxAttempts ?? 1);
+        bool TryCopy(int idx, out Event[]? eventsArr, out long ver)
+        {
+            if (_usePadding)
+            {
+                if (_paddedPartitions![idx].TryCopyStable(out var arrObj, out ver))
+                {
+                    eventsArr = Unsafe.As<Event[]?>(arrObj);
+                    return true;
+                }
+            }
+            else if (_partitions![idx].TryCopyStable(out var arrObj2, out ver))
+            {
+                eventsArr = Unsafe.As<Event[]?>(arrObj2);
+                return true;
+            }
+            eventsArr = null;
+            ver = 0;
+            return false;
+        }
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            if (TryCopy(p, out var arr, out var ver))
+            {
+                snapshot = new PartitionState
+                {
+                    PartitionKey = partitionKey,
+                    Version = ver,
+                    Events = arr!,
+                    TakenAt = DateTimeOffset.UtcNow,
+                    SchemaVersion = 1
+                };
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Added: internal partition restore helper for snapshot subsystem (RFC005 Item2)
+    internal bool TryRestorePartition(int partitionIndex, ReadOnlySpan<Event> events)
+    {
+        if (typeof(TEvent) != typeof(Event))
+        {
+            return false; // only valid for Event generic instantiation
+        }
+        var partitionCount = GetPartitionCount();
+        if (partitionIndex < 0 || partitionIndex >= partitionCount)
+        {
+            return false;
+        }
+        var capacity = GetPartitionCapacity(partitionIndex);
+        var total = events.Length;
+        if (total == 0)
+        {
+            ClearPartition(partitionIndex); // empty restore clears partition
+            return true;
+        }
+        // Keep only last 'capacity' events if snapshot larger than ring capacity
+        var start = total > capacity ? total - capacity : 0;
+        var slice = events[start..];
+        ClearPartition(partitionIndex);
+        // Rehydrate events into the ring buffer in order
+        // We batch append by creating a typed span when possible
+        var span = slice; // ReadOnlySpan<Event>
+        if (span.Length > 0)
+        {
+            // Reinterpret span to TEvent (safe because TEvent == Event checked above)
+            ref var first = ref MemoryMarshal.GetReference(span);
+            var typedSpan = MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<Event, TEvent>(ref first), span.Length);
+            _ = TryEnqueueBatchToPartition(partitionIndex, typedSpan);
+            IncrementAppendCount(span.Length);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Configures snapshot subsystem for this store (only valid when TEvent is Event). Returns the created Snapshotter.
+    /// Must be called once; further calls throw. Does not start background loop automatically.
+    /// </summary>
+    public Snapshotter ConfigureSnapshots(
+        SnapshotOptions options,
+        ISnapshotSerializer serializer,
+        ISnapshotStore store,
+        Microsoft.Extensions.Logging.ILogger? logger = null,
+        IEventDeltaWriter? deltaWriter = null,
+        IBackoffPolicy? backoff = null)
+    {
+        if (typeof(TEvent) != typeof(Event))
+        {
+            throw new InvalidOperationException("Snapshot subsystem only supported when TEvent is Event.");
+        }
+        lock (_snapshotInitLock)
+        {
+            if (_snapConfigured)
+            {
+                throw new InvalidOperationException("Snapshots already configured for this store instance.");
+            }
+            SnapshotValidation.ValidateSnapshotOptions(options, serializer, store);
+            var snap = new Snapshotter(Unsafe.As<EventStore<Event>>(this), options, serializer, store, logger, deltaWriter, backoff);
+            AttachSnapshotter(snap);
+            // Publish configured flag with release semantics to ensure visibility of initialized snapshotter.
+            Volatile.Write(ref _snapConfigured, true);
+            return snap;
+        }
+    }
+
+    /// <summary>
+    /// Restores in-memory partitions from latest snapshots (if snapshot subsystem configured). Returns number of partitions restored.
+    /// Acquires the snapshot init lock to avoid racing with concurrent configuration so we do not return 0 while configuration is in-flight.
+    /// </summary>
+    public Task<int> RestoreFromSnapshotsAsync(CancellationToken ct = default)
+    {
+        Snapshotter? snap;
+        lock (_snapshotInitLock)
+        {
+            // Use volatile read to ensure we see the publication from ConfigureSnapshots.
+            if (!Volatile.Read(ref _snapConfigured) || _snapshotterRef is null)
+            {
+                return Task.FromResult(0);
+            }
+            snap = _snapshotterRef; // snapshot of reference while under lock
+        }
+        return snap.RestoreFromSnapshotsAsync(ct);
+    }
+
+    /// <summary>
+    /// Attempts to retrieve current snapshot subsystem metrics. Returns false if snapshots not configured or TEvent != Event.
+    /// </summary>
+    public bool TryGetSnapshotMetrics(out Snapshotter.SnapshotterMetrics metrics)
+    {
+        metrics = default;
+        if (typeof(TEvent) != typeof(Event) || _snapshotterRef is null)
+        {
+            return false;
+        }
+        metrics = _snapshotterRef.GetMetrics();
         return true;
     }
 }
