@@ -99,10 +99,11 @@ public class SnapshotsAdditionalEdgeTests
         Assert.Throws<ArgumentOutOfRangeException>(() => new ExponentialBackoffPolicy(TimeSpan.FromMilliseconds(1), 0));
         var policy = new ExponentialBackoffPolicy(TimeSpan.FromMilliseconds(5), 2);
         var d1 = policy.NextDelay(0); // coerced to attempt 1
-        var d2 = policy.NextDelay(1); // monotonic increase enforced even with same attempt
+        var d2 = policy.NextDelay(1); // second call (same logical attempt) may be >= d1 due to enforced monotonicity
         var dHuge = policy.NextDelay(10_000); // should overflow -> MaxValue (or extremely large)
-        Assert.True(d1.TotalMilliseconds >= 5);
-        Assert.True(d2 > d1);
+        // With symmetric jitter first delay is in [4.5, 5.5) ms, second raw value could be smaller, but CAS logic forces non-decreasing.
+        Assert.InRange(d1.TotalMilliseconds, 4.5, 5.5);
+        Assert.True(d2 >= d1); // allow equality after CAS adjustment
         Assert.True(dHuge == TimeSpan.MaxValue || dHuge > d2);
     }
 

@@ -605,7 +605,8 @@ public class SnapshotsFeatureTests
         var d1 = policy.NextDelay(1);
         var d2 = policy.NextDelay(2);
         var d3 = policy.NextDelay(3);
-        Assert.True(d1.TotalMilliseconds >= 10);
+        // With symmetric +/-10% jitter first delay can be in [9,11) ms.
+        Assert.InRange(d1.TotalMilliseconds, 9.0, 11.0);
         Assert.True(d2 > d1);
         Assert.True(d3 > d2);
     }

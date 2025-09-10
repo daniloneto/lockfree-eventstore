@@ -180,9 +180,17 @@ Key goals:
 
 #### Configuration
 ```csharp
-var store = new LockFreeEventStore(
-    options: new EventStoreOptions { /* existing core options */ },
-    snapshotOptions: new SnapshotOptions
+var store = new EventStore<Event>(new EventStoreOptions<Event>
+{
+    // existing core options
+    CapacityPerPartition = 1_000_000,
+    Partitions = Environment.ProcessorCount,
+    EnableFalseSharingProtection = true
+});
+
+// Configure snapshot subsystem (one-time)
+var snapshotter = store.ConfigureSnapshots(
+    new SnapshotOptions
     {
         Enabled = true,
         Interval = TimeSpan.FromMinutes(2),            // Time-based trigger (can be combined with MinEventsBetweenSnapshots)
@@ -192,14 +200,14 @@ var store = new LockFreeEventStore(
         MaxSaveAttempts = 5,                           // Retry attempts for transient errors
         BackoffBaseDelay = TimeSpan.FromMilliseconds(100),
         BackoffFactor = 2.0,
-        CompactBeforeSnapshot = true,                  // (If compaction hook is enabled internally)
+        CompactBeforeSnapshot = true,                  // (Future compaction hook)
         EnableLocalTracing = false                     // Enables ActivitySource if true
     },
-    snapshotSerializer: new BinarySnapshotSerializer(),
-    snapshotStore: new FileSystemSnapshotStore("snapshots")
+    serializer: new BinarySnapshotSerializer(),
+    store: new FileSystemSnapshotStore("snapshots")
 );
 
-await store.RestoreFromSnapshotsAsync(); // Rebuilds in-memory state before serving traffic
+await store.RestoreFromSnapshotsAsync(); // Rebuild in-memory state before serving traffic
 ```
 
 #### Stable View Extraction

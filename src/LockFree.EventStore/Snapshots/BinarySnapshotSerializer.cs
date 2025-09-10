@@ -1,10 +1,13 @@
 using System.IO;
 using System.IO.Compression;
+using System.Text;
 
 namespace LockFree.EventStore.Snapshots;
 
 /// <summary>
 /// Compact binary serializer for <see cref="PartitionState"/> with optional GZip compression.
+/// Now writes directly to the destination stream (avoids intermediate buffering) and
+/// auto-detects GZip magic bytes on deserialize to tolerate configuration changes.
 /// </summary>
 public sealed class BinarySnapshotSerializer(bool compress = false) : ISnapshotSerializer
 {
@@ -15,45 +18,70 @@ public sealed class BinarySnapshotSerializer(bool compress = false) : ISnapshotS
     {
         ArgumentNullException.ThrowIfNull(destination);
         ArgumentNullException.ThrowIfNull(state);
-        using var ms = new MemoryStream();
-        using (var bw = new BinaryWriter(ms, System.Text.Encoding.UTF8, leaveOpen: true))
+        // Write directly to destination to avoid double buffering. Apply compression if configured.
+        var target = destination;
+        GZipStream? gzip = null;
+        if (_compress)
+        {
+            // SmallestSize for archival snapshot; adjust if throughput preferred.
+            gzip = new GZipStream(destination, CompressionLevel.SmallestSize, leaveOpen: true);
+            target = gzip;
+        }
+        // BinaryWriter is sync; previous implementation buffered into MemoryStream synchronously too, then async copied.
+        // For very large snapshots this reduces peak memory. Cancellation is checked periodically.
+        using (var bw = new BinaryWriter(target, Encoding.UTF8, leaveOpen: true))
         {
             bw.Write(state.SchemaVersion);
             bw.Write(state.PartitionKey);
             bw.Write(state.Version);
             bw.Write(state.TakenAt.UtcDateTime.Ticks);
             bw.Write(state.Events.Length);
-            foreach (var e in state.Events)
+            var events = state.Events;
+            for (var i = 0; i < events.Length; i++)
             {
+                if ((i & 0x3FF) == 0) // every 1024 events
+                {
+                    ct.ThrowIfCancellationRequested();
+                }
+                var e = events[i];
                 bw.Write(e.Key.Value);
                 bw.Write(e.Value);
                 bw.Write(e.TimestampTicks);
             }
         }
-        ms.Position = 0;
-        if (_compress)
+        if (gzip != null)
         {
-            using var gz = new GZipStream(destination, CompressionLevel.SmallestSize, leaveOpen: true);
-            await ms.CopyToAsync(gz, ct).ConfigureAwait(false);
-            await gz.FlushAsync(ct).ConfigureAwait(false);
+            await gzip.FlushAsync(ct).ConfigureAwait(false); // ensures trailer written
+            gzip.Dispose(); // finish compression (leaveOpen: true keeps destination open)
         }
-        else
-        {
-            await ms.CopyToAsync(destination, ct).ConfigureAwait(false);
-            await destination.FlushAsync(ct).ConfigureAwait(false);
-        }
+        await destination.FlushAsync(ct).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
     public ValueTask<PartitionState> DeserializeAsync(Stream source, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(source);
-        return _compress ? DeserializeCompressedAsync(source) : DeserializePlainAsync(source);
+        // Auto-detect GZip magic (0x1F, 0x8B) when possible to tolerate config changes between runs.
+        bool? detectedGzip = null;
+        if (source.CanSeek)
+        {
+            var pos = source.Position;
+            Span<byte> header = stackalloc byte[2];
+            var read = source.Read(header);
+            source.Position = pos; // rewind
+            if (read == 2)
+            {
+                detectedGzip = header[0] == 0x1F && header[1] == 0x8B;
+            }
+        }
+        // If detection succeeded use it, else fall back to configured behavior.
+        var useGzip = detectedGzip ?? _compress;
+        return useGzip ? DeserializeCompressedAsync(source) : DeserializePlainAsync(source);
     }
 
     private static ValueTask<PartitionState> DeserializePlainAsync(Stream source)
     {
-        using var br = new BinaryReader(source, System.Text.Encoding.UTF8, leaveOpen: true);
+        using var br = new BinaryReader(source, Encoding.UTF8, leaveOpen: true);
         return new ValueTask<PartitionState>(ReadPartition(br));
     }
 
@@ -154,7 +182,7 @@ public sealed class BinarySnapshotSerializer(bool compress = false) : ISnapshotS
     private static async ValueTask<PartitionState> DeserializeCompressedAsync(Stream source)
     {
         using var gz = new GZipStream(source, CompressionMode.Decompress, leaveOpen: true);
-        using var br = new BinaryReader(gz, System.Text.Encoding.UTF8, leaveOpen: true);
+        using var br = new BinaryReader(gz, Encoding.UTF8, leaveOpen: true);
         await Task.Yield(); // ensure async path for symmetry
         return ReadPartition(br);
     }

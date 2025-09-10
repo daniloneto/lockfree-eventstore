@@ -163,7 +163,7 @@ public interface IBackoffPolicy
 }
 
 /// <summary>
-/// Exponential backoff policy with +/-10% jitter.
+/// Exponential backoff policy with +/-10% jitter (symmetric around the mean to avoid biasing upward).
 /// </summary>
 public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) : IBackoffPolicy
 {
@@ -178,6 +178,7 @@ public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) 
 
     private double _lastDelayMs; // updated atomically via CAS loop to preserve monotonicity
     private const double DelayEqualityEpsilon = 1e-9; // tolerance for floating point compare
+    private const double JitterPercentage = 0.10; // 10% symmetric jitter => multiplier in [0.9, 1.1)
 
     /// <inheritdoc />
     public TimeSpan NextDelay(int attempt)
@@ -206,7 +207,10 @@ public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) 
                 return TimeSpan.MaxValue;
             }
         }
-        var jitterMultiplier = 1.0 + (Random.Shared.NextDouble() * 0.1); // [1.0, 1.1)
+        // Symmetric jitter: Random value in [0,1) mapped to [-JitterPercentage, +JitterPercentage)
+        // multiplier = 1 + ((r * 2) - 1) * JitterPercentage  => [1 - JitterPercentage, 1 + JitterPercentage)
+        var r = Random.Shared.NextDouble();
+        var jitterMultiplier = 1.0 + (((r * 2.0) - 1.0) * JitterPercentage);
         var ms = raw * jitterMultiplier;
         var maxMs = TimeSpan.MaxValue.TotalMilliseconds;
         if (ms >= maxMs)

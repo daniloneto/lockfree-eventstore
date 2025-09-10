@@ -53,6 +53,31 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
         {
             throw new ArgumentException("Partition key contains disallowed characters", nameof(partitionKey));
         }
+        // Block Windows reserved device names early for clearer errors (CON, PRN, AUX, NUL, COM1..COM9, LPT1..LPT9)
+        if (OperatingSystem.IsWindows())
+        {
+            var trimmed = partitionKey.TrimEnd('.', ' ');
+            var up = trimmed.ToUpperInvariant();
+            static bool IsDevice(string u)
+            {
+                if (u is "CON" or "PRN" or "AUX" or "NUL")
+                {
+                    return true;
+                }
+                if (u.Length == 4 && char.IsDigit(u[3]) && u[3] != '0')
+                {
+                    if (u.StartsWith("COM", StringComparison.Ordinal) || u.StartsWith("LPT", StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            if (IsDevice(up))
+            {
+                throw new ArgumentException("Partition key is a reserved device name on Windows", nameof(partitionKey));
+            }
+        }
 
         var rootFull = Path.GetFullPath(root);
         if (!rootFull.EndsWith(Path.DirectorySeparatorChar))
@@ -90,7 +115,14 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
         var moved = false;
         try
         {
-            fs = new FileStream(tmpPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.WriteThrough);
+            fs = new FileStream(tmpPath, new FileStreamOptions
+            {
+                Mode = FileMode.CreateNew,
+                Access = FileAccess.Write,
+                Share = FileShare.None,
+                BufferSize = 64 * 1024,
+                Options = FileOptions.WriteThrough | FileOptions.Asynchronous
+            });
             try
             {
                 await data.CopyToAsync(fs, ct).ConfigureAwait(false);
@@ -99,11 +131,8 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
             }
             finally
             {
-                // Ensure the handle is closed before attempting the atomic move.
-                if (fs != null)
-                {
-                    await fs.DisposeAsync().ConfigureAwait(false);
-                }
+                await fs.DisposeAsync().ConfigureAwait(false);
+
                 fs = null;
             }
 
@@ -148,12 +177,12 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
     }
 
     /// <inheritdoc />
-    public async ValueTask<(SnapshotMetadata Meta, Stream Data)?> TryLoadLatestAsync(string partitionKey, CancellationToken ct = default)
+    public ValueTask<(SnapshotMetadata Meta, Stream Data)?> TryLoadLatestAsync(string partitionKey, CancellationToken ct = default)
     {
         var dir = PartitionDir(_root, partitionKey);
         if (!Directory.Exists(dir))
         {
-            return null;
+            return new ValueTask<(SnapshotMetadata Meta, Stream Data)?>(result: null);
         }
         var files = Directory.EnumerateFiles(dir, "*.snap", SearchOption.TopDirectoryOnly);
         SnapshotMetadata? bestMeta = null;
@@ -184,14 +213,17 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
         }
         if (bestMeta is null || bestPath is null)
         {
-            return null;
+            return new ValueTask<(SnapshotMetadata Meta, Stream Data)?>(result: null);
         }
-        // Open, copy into memory, then dispose the file stream so callers don't need to manage file handle lifetime.
-        await using var fs = new FileStream(bestPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        var ms = new MemoryStream(capacity: (int)Math.Min(fs.Length, int.MaxValue));
-        await fs.CopyToAsync(ms, ct).ConfigureAwait(false);
-        ms.Position = 0;
-        return (bestMeta.Value, ms);
+        // Stream the snapshot file directly to avoid large in-memory allocation; caller is responsible for disposal.
+        var fs = new FileStream(bestPath, new FileStreamOptions
+        {
+            Mode = FileMode.Open,
+            Access = FileAccess.Read,
+            Share = FileShare.ReadWrite | FileShare.Delete,
+            Options = FileOptions.Asynchronous | FileOptions.SequentialScan
+        });
+        return new ValueTask<(SnapshotMetadata Meta, Stream Data)?>((bestMeta.Value, fs));
     }
 
     /// <inheritdoc />
@@ -200,7 +232,17 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
         foreach (var dir in Directory.EnumerateDirectories(_root))
         {
             ct.ThrowIfCancellationRequested();
-            yield return Path.GetFileName(dir);
+            var name = Path.GetFileName(dir);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+            // Filter out any directory names that do not satisfy the allowed partition key regex
+            if (!AllowedPartitionKeyRegex().IsMatch(name))
+            {
+                continue;
+            }
+            yield return name;
             await Task.Yield();
         }
     }
@@ -219,7 +261,7 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
         }
 
         var entries = new List<(FileInfo File, long Version, long Ticks)>();
-        foreach (var path in Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly))
+        foreach (var path in Directory.EnumerateFiles(dir, "*.snap", SearchOption.TopDirectoryOnly))
         {
             ct.ThrowIfCancellationRequested();
             if (TryParseSnapshotEntry(path, out var entry))
