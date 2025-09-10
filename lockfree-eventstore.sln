@@ -10,8 +10,6 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{0AB3BF05
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MetricsDashboard", "samples\MetricsDashboard\MetricsDashboard.csproj", "{1EA41106-C3D8-2760-79D1-F3C76FF7DF52}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SnapshotSensors", "samples\SnapshotSensors\SnapshotSensors.csproj", "{E6F2D726-A9F0-4B7D-8F46-3A2FE4E2B19F}"
-EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SnapshotSensorsApi", "samples\SnapshotSensorsApi\SnapshotSensorsApi.csproj", "{9F1D2A6D-8E3B-4F9F-9A7D-9F7A2F7E2C11}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LockFree.EventStore", "src\LockFree.EventStore\LockFree.EventStore.csproj", "{AA7A7C78-8895-689A-BA06-2D78317966F2}"
