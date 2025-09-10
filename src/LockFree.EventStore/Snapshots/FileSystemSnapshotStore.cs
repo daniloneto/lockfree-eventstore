@@ -100,11 +100,11 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
             finally
             {
                 // Ensure the handle is closed before attempting the atomic move.
-                if (fs is not null)
+                if (fs != null)
                 {
                     await fs.DisposeAsync().ConfigureAwait(false);
-                    fs = null;
                 }
+                fs = null;
             }
 
             // Verify temp file still exists (defensive, should always be true)
@@ -129,10 +129,9 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
             {
                 try
                 {
-                    if (fs is not null)
+                    if (fs != null)
                     {
                         await fs.DisposeAsync().ConfigureAwait(false);
-                        fs = null;
                     }
                 }
                 catch { /* ignore */ }

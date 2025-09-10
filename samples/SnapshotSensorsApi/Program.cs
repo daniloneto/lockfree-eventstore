@@ -132,7 +132,7 @@ app.MapGet("/metrics", (EventStore<Event> store) =>
     });
 });
 
-app.Run();
+await app.RunAsync();
 
 namespace SnapshotSensorsApi
 {
