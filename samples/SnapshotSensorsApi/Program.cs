@@ -146,130 +146,133 @@ namespace SnapshotSensorsApi
         [property: JsonPropertyName("timestampUtc")] DateTime? TimestampUtc);
 }
 
-// ================= Aggregator =================
-internal sealed class Aggregator
+namespace SnapshotSensorsApi
 {
-    private readonly Lock _lock = new();
-    private Stats _temp = Stats.Create();
-    private Stats _hum = Stats.Create();
-
-    public void Add(double temperature, double humidity)
+    // ================= Aggregator =================
+    internal sealed class Aggregator
     {
-        using (_lock.EnterScope())
-        {
-            _temp.Update(temperature);
-            _hum.Update(humidity);
-        }
-    }
+        private readonly Lock _lock = new();
+        private Stats _temp = Stats.Create();
+        private Stats _hum = Stats.Create();
 
-    public void RebuildFromEvents(IEnumerable<Event> events)
-    {
-        using (_lock.EnterScope())
+        public void Add(double temperature, double humidity)
         {
-            _temp = Stats.Create();
-            _hum = Stats.Create();
-            foreach (var e in events)
+            using (_lock.EnterScope())
             {
-                if (e.Key.Value == 1)
+                _temp.Update(temperature);
+                _hum.Update(humidity);
+            }
+        }
+
+        public void RebuildFromEvents(IEnumerable<Event> events)
+        {
+            using (_lock.EnterScope())
+            {
+                _temp = Stats.Create();
+                _hum = Stats.Create();
+                foreach (var e in events)
                 {
-                    _temp.Update(e.Value);
+                    if (e.Key.Value == 1)
+                    {
+                        _temp.Update(e.Value);
+                    }
+                    else if (e.Key.Value == 2)
+                    {
+                        _hum.Update(e.Value);
+                    }
                 }
-                else if (e.Key.Value == 2)
+            }
+        }
+
+        public (object temperature, object humidity) GetState()
+        {
+            using (_lock.EnterScope())
+            {
+                return (ToDto(_temp), ToDto(_hum));
+            }
+        }
+
+        private static object ToDto(Stats s)
+        {
+            return new
+            {
+                count = s.Count,
+                min = s.Count == 0 ? 0 : s.Min,
+                max = s.Count == 0 ? 0 : s.Max,
+                avg = s.Count == 0 ? 0 : s.Sum / s.Count
+            };
+        }
+
+        private struct Stats
+        {
+            public long Count;
+            public double Sum;
+            public double Min;
+            public double Max;
+
+            public static Stats Create()
+            {
+                return new Stats { Min = double.MaxValue, Max = double.MinValue };
+            }
+
+            public void Update(double v)
+            {
+                if (Count == 0)
                 {
-                    _hum.Update(e.Value);
+                    Min = Max = v;
                 }
+                else
+                {
+                    if (v < Min)
+                    {
+                        Min = v;
+                    }
+                    if (v > Max)
+                    {
+                        Max = v;
+                    }
+                }
+                Count++;
+                Sum += v;
             }
         }
     }
 
-    public (object temperature, object humidity) GetState()
+    // ================= ParseLog =================
+    internal static class ParseLog
     {
-        using (_lock.EnterScope())
+        private static readonly Action<ILogger, string, Exception?> _jsonParseWarn = LoggerMessage.Define<string>(LogLevel.Warning, new EventId(101, "JsonParse"), "JSON parse failed: {Message}");
+        public static void JsonParseWarning(ILogger logger, Exception ex)
         {
-            return (ToDto(_temp), ToDto(_hum));
+            _jsonParseWarn(logger, ex.Message, ex);
         }
     }
 
-    private static object ToDto(Stats s)
+    // ================= SensorLog =================
+    internal static class SensorLog
     {
-        return new
+        private static readonly Action<ILogger, string, Exception?> _accepted = LoggerMessage.Define<string>(LogLevel.Debug, new EventId(201, "Accepted"), "Accepted reading for device {DeviceId}");
+        private static readonly Action<ILogger, Exception?> _missingBody = LoggerMessage.Define(LogLevel.Warning, new EventId(202, "MissingBody"), "Missing request body");
+        private static readonly Action<ILogger, Exception?> _missingDevice = LoggerMessage.Define(LogLevel.Warning, new EventId(203, "MissingDevice"), "Missing device id");
+        private static readonly Action<ILogger, double, double, Exception?> _invalidNumeric = LoggerMessage.Define<double, double>(LogLevel.Warning, new EventId(204, "InvalidNumeric"), "Invalid numeric values temp={Temp} hum={Hum}");
+        public static void Accepted(ILogger l, string device)
         {
-            count = s.Count,
-            min = s.Count == 0 ? 0 : s.Min,
-            max = s.Count == 0 ? 0 : s.Max,
-            avg = s.Count == 0 ? 0 : s.Sum / s.Count
-        };
-    }
-
-    private struct Stats
-    {
-        public long Count;
-        public double Sum;
-        public double Min;
-        public double Max;
-
-        public static Stats Create()
-        {
-            return new Stats { Min = double.MaxValue, Max = double.MinValue };
+            _accepted(l, device, null);
         }
 
-        public void Update(double v)
+        public static void MissingBody(ILogger l)
         {
-            if (Count == 0)
-            {
-                Min = Max = v;
-            }
-            else
-            {
-                if (v < Min)
-                {
-                    Min = v;
-                }
-                if (v > Max)
-                {
-                    Max = v;
-                }
-            }
-            Count++;
-            Sum += v;
+            _missingBody(l, null);
         }
-    }
-}
 
-// ================= ParseLog =================
-internal static class ParseLog
-{
-    private static readonly Action<ILogger, string, Exception?> _jsonParseWarn = LoggerMessage.Define<string>(LogLevel.Warning, new EventId(101, "JsonParse"), "JSON parse failed: {Message}");
-    public static void JsonParseWarning(ILogger logger, Exception ex)
-    {
-        _jsonParseWarn(logger, ex.Message, ex);
-    }
-}
+        public static void MissingDevice(ILogger l)
+        {
+            _missingDevice(l, null);
+        }
 
-// ================= SensorLog =================
-internal static class SensorLog
-{
-    private static readonly Action<ILogger, string, Exception?> _accepted = LoggerMessage.Define<string>(LogLevel.Debug, new EventId(201, "Accepted"), "Accepted reading for device {DeviceId}");
-    private static readonly Action<ILogger, Exception?> _missingBody = LoggerMessage.Define(LogLevel.Warning, new EventId(202, "MissingBody"), "Missing request body");
-    private static readonly Action<ILogger, Exception?> _missingDevice = LoggerMessage.Define(LogLevel.Warning, new EventId(203, "MissingDevice"), "Missing device id");
-    private static readonly Action<ILogger, double, double, Exception?> _invalidNumeric = LoggerMessage.Define<double, double>(LogLevel.Warning, new EventId(204, "InvalidNumeric"), "Invalid numeric values temp={Temp} hum={Hum}");
-    public static void Accepted(ILogger l, string device)
-    {
-        _accepted(l, device, null);
-    }
-
-    public static void MissingBody(ILogger l)
-    {
-        _missingBody(l, null);
-    }
-
-    public static void MissingDevice(ILogger l)
-    {
-        _missingDevice(l, null);
-    }
-
-    public static void InvalidNumeric(ILogger l, double t, double h)
-    {
-        _invalidNumeric(l, t, h, null);
+        public static void InvalidNumeric(ILogger l, double t, double h)
+        {
+            _invalidNumeric(l, t, h, null);
+        }
     }
 }

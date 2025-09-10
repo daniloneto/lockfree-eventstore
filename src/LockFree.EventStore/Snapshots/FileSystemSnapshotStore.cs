@@ -150,10 +150,10 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
         {
             return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>(null);
         }
-        // Use broad FileShare to allow deletion while stream still open (tests clean up directories immediately on Windows)
-        var stream = new FileStream(bestPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        var result = (bestMeta.Value, (Stream)stream);
-        return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>(result);
+        // Use broad FileShare to allow deletion while stream still open (tests clean up directories immediately on Windows).
+        // Ownership of the returned FileStream is transferred to the caller who MUST dispose it.
+        return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>(
+            (bestMeta.Value, new FileStream(bestPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)));
     }
 
     /// <inheritdoc />
