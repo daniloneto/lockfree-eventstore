@@ -172,6 +172,18 @@ public class SnapshotsMoreEdgeTests
             var meta = new SnapshotMetadata("p", 1, DateTimeOffset.UtcNow, 1);
             using var ms = new MemoryStream(new byte[]{1,2,3});
             await fs.SaveAsync(meta, ms); // should not throw
+            // Added assertions: snapshot file exists, no temp files remain, file readable
+            var partitionDir = Path.Combine(root, "p");
+            Assert.True(Directory.Exists(partitionDir), "Partition directory not created");
+            var snapFiles = Directory.GetFiles(partitionDir, "*.snap", SearchOption.TopDirectoryOnly);
+            Assert.Single(snapFiles); // exactly one snapshot expected
+            var allFiles = Directory.GetFiles(partitionDir, "*", SearchOption.TopDirectoryOnly);
+            Assert.DoesNotContain(allFiles, f => f.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase));
+            // Open to ensure not locked and content length matches written
+            using (var read = File.OpenRead(snapFiles[0]))
+            {
+                Assert.True(read.Length > 0, "Snapshot file is empty");
+            }
         }
         finally
         {

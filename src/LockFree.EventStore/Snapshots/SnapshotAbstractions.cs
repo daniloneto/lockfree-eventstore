@@ -177,6 +177,7 @@ public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) 
     // Removed per-instance Random (not thread-safe); using Random.Shared.
 
     private double _lastDelayMs; // updated atomically via CAS loop to preserve monotonicity
+    private const double DelayEqualityEpsilon = 1e-9; // tolerance for floating point compare
 
     /// <inheritdoc />
     public TimeSpan NextDelay(int attempt)
@@ -218,7 +219,8 @@ public sealed class ExponentialBackoffPolicy(TimeSpan baseDelay, double factor) 
             var observed = Volatile.Read(ref _lastDelayMs);
             var candidate = ms <= observed ? Math.Min(observed + 1, maxMs - 1) : ms;
             var original = Interlocked.CompareExchange(ref _lastDelayMs, candidate, observed);
-            if (original == observed)
+            // Floating point equality replaced with epsilon-based comparison per guideline.
+            if (Math.Abs(original - observed) < DelayEqualityEpsilon)
             {
                 ms = candidate;
                 break;

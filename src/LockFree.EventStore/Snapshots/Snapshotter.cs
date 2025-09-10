@@ -231,74 +231,17 @@ public sealed class Snapshotter : IDisposable
     {
         using var act = _activity?.StartActivity("snapshot.save");
 
-        // Capture stable per-partition view (non-blocking). If it fails (contention), record and skip this round.
-        if (!_store.TryGetStableView(partitionKey, out var state))
+        if (!TryCaptureStableState(partitionKey, act, out var state))
         {
-            var status = _partitionStatus.GetOrAdd(partitionKey, _ => new PartitionSnapshotInternal());
-            lock (status)
-            {
-                status.StableCaptureFailedCount++;
-            }
-            _ = Interlocked.Increment(ref _stableCaptureFailures);
-            if (_logger != null)
-            {
-                _logStableFail(_logger, partitionKey, null);
-            }
-            // Enrich tracing for stable capture failures
-            _ = act?.AddTag("partition", partitionKey);
-            _ = act?.AddTag("outcome", "stable-capture-failed");
-            return; // will be retried on next trigger
+            return; // stable capture failed; metrics & tracing already recorded
         }
 
-        var attempt = 0;
-        while (true)
+        for (var attempt = 1; attempt <= Options.MaxSaveAttempts; attempt++)
         {
-            attempt++;
             try
             {
-                using var ms = new MemoryStream();
-                await _serializer.SerializeAsync(ms, state, ct).ConfigureAwait(false);
-                ms.Position = 0;
-                var meta = new SnapshotMetadata(partitionKey, state.Version, state.TakenAt, state.SchemaVersion);
-                await _storeBackend.SaveAsync(meta, ms, ct).ConfigureAwait(false);
-                // Run pruning asynchronously with error handling & cancellation awareness
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await _storeBackend.PruneAsync(partitionKey, Options.SnapshotsToKeep, ct).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                    {
-                        // Cancellation expected during shutdown; swallow silently
-                    }
-                    catch (Exception ex)
-                    {
-                        if (_logger != null)
-                        {
-                            _logPruneFailed(_logger, partitionKey, ex);
-                        }
-                    }
-                }, ct);
-                _ = act?.AddTag("partition", partitionKey);
-                _ = act?.AddTag("version", state.Version);
-                _ = act?.AddTag("bytes", ms.Length);
-                _ = act?.AddTag("attempts", attempt);
-                _ = act?.AddTag("outcome", "success");
-
-                // Metrics update success
-                var status = _partitionStatus.GetOrAdd(partitionKey, _ => new PartitionSnapshotInternal());
-                lock (status)
-                {
-                    var prevVersion = status.LastVersion;
-                    var delta = prevVersion > 0 && state.Version >= prevVersion ? state.Version - prevVersion : 0;
-                    status.LastVersion = state.Version;
-                    status.LastSnapshotAt = state.TakenAt;
-                    status.EventsSinceLastSnapshot = delta;
-                    status.LastSaveAttempts = attempt;
-                    status.SuccessCount++;
-                }
-                return;
+                await SaveSnapshotCoreAsync(partitionKey, state, attempt, act, ct).ConfigureAwait(false);
+                return; // success
             }
             catch (Exception ex) when (attempt < Options.MaxSaveAttempts && !ct.IsCancellationRequested)
             {
@@ -311,25 +254,108 @@ public sealed class Snapshotter : IDisposable
             }
             catch (Exception ex)
             {
-                if (_logger != null)
-                {
-                    _logSaveFailed(_logger, attempt, ex);
-                }
-                // Metrics update failure after giving up
-                var status = _partitionStatus.GetOrAdd(partitionKey, _ => new PartitionSnapshotInternal());
-                lock (status)
-                {
-                    status.LastSaveAttempts = attempt;
-                    status.FailedCount++;
-                }
-                _ = Interlocked.Increment(ref _totalFailed);
-                _ = act?.AddTag("partition", partitionKey);
-                _ = act?.AddTag("attempts", attempt);
-                _ = act?.AddTag("error", ex.GetType().Name);
-                _ = act?.AddTag("outcome", "failure");
+                RecordFailure(partitionKey, attempt, ex, act);
                 return;
             }
         }
+    }
+
+    private bool TryCaptureStableState(string partitionKey, Activity? act, out PartitionState state)
+    {
+        if (_store.TryGetStableView(partitionKey, out state))
+        {
+            return true;
+        }
+        RecordStableCaptureFailure(partitionKey, act);
+        return false;
+    }
+
+    private void RecordStableCaptureFailure(string partitionKey, Activity? act)
+    {
+        var status = _partitionStatus.GetOrAdd(partitionKey, _ => new PartitionSnapshotInternal());
+        lock (status)
+        {
+            status.StableCaptureFailedCount++;
+        }
+        _ = Interlocked.Increment(ref _stableCaptureFailures);
+        if (_logger != null)
+        {
+            _logStableFail(_logger, partitionKey, null);
+        }
+        _ = act?.AddTag("partition", partitionKey);
+        _ = act?.AddTag("outcome", "stable-capture-failed");
+    }
+
+    private async Task SaveSnapshotCoreAsync(string partitionKey, PartitionState state, int attempt, Activity? act, CancellationToken ct)
+    {
+        using var ms = new MemoryStream();
+        await _serializer.SerializeAsync(ms, state, ct).ConfigureAwait(false);
+        ms.Position = 0;
+        var meta = new SnapshotMetadata(partitionKey, state.Version, state.TakenAt, state.SchemaVersion);
+        await _storeBackend.SaveAsync(meta, ms, ct).ConfigureAwait(false);
+        _ = RunPruneAsync(partitionKey, ct); // fire & forget
+        RecordSuccess(partitionKey, state, attempt, ms.Length, act);
+    }
+
+    private Task RunPruneAsync(string partitionKey, CancellationToken ct)
+    {
+        return Task.Run(async () =>
+        {
+            try
+            {
+                await _storeBackend.PruneAsync(partitionKey, Options.SnapshotsToKeep, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // expected on shutdown
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null)
+                {
+                    _logPruneFailed(_logger, partitionKey, ex);
+                }
+            }
+        }, ct);
+    }
+
+    private void RecordSuccess(string partitionKey, PartitionState state, int attempt, long bytes, Activity? act)
+    {
+        _ = act?.AddTag("partition", partitionKey);
+        _ = act?.AddTag("version", state.Version);
+        _ = act?.AddTag("bytes", bytes);
+        _ = act?.AddTag("attempts", attempt);
+        _ = act?.AddTag("outcome", "success");
+        var status = _partitionStatus.GetOrAdd(partitionKey, _ => new PartitionSnapshotInternal());
+        lock (status)
+        {
+            var prevVersion = status.LastVersion;
+            var delta = prevVersion > 0 && state.Version >= prevVersion ? state.Version - prevVersion : 0;
+            status.LastVersion = state.Version;
+            status.LastSnapshotAt = state.TakenAt;
+            status.EventsSinceLastSnapshot = delta;
+            status.LastSaveAttempts = attempt;
+            status.SuccessCount++;
+        }
+    }
+
+    private void RecordFailure(string partitionKey, int attempt, Exception ex, Activity? act)
+    {
+        if (_logger != null)
+        {
+            _logSaveFailed(_logger, attempt, ex);
+        }
+        var status = _partitionStatus.GetOrAdd(partitionKey, _ => new PartitionSnapshotInternal());
+        lock (status)
+        {
+            status.LastSaveAttempts = attempt;
+            status.FailedCount++;
+        }
+        _ = Interlocked.Increment(ref _totalFailed);
+        _ = act?.AddTag("partition", partitionKey);
+        _ = act?.AddTag("attempts", attempt);
+        _ = act?.AddTag("error", ex.GetType().Name);
+        _ = act?.AddTag("outcome", "failure");
     }
 
     /// <summary>Returns current snapshotter metrics snapshot.</summary>
@@ -345,14 +371,11 @@ public sealed class Snapshotter : IDisposable
             if (int.TryParse(kvp.Key,
                             System.Globalization.NumberStyles.None,
                              System.Globalization.CultureInfo.InvariantCulture,
-                             out var idx))
+                             out _) && _store.TryGetStableView(kvp.Key, out var state))
             {
                 // Attempt a lightweight stable copy to read current version without materializing events when possible.
-                if (_store.TryGetStableView(kvp.Key, out var state))
-                {
-                    headVersion = state.Version;
-                    buffered = state.Events.LongLength; // length of stable snapshot (<= capacity)
-                }
+                headVersion = state.Version;
+                buffered = state.Events.LongLength; // length of stable snapshot (<= capacity)
             }
             lock (s)
             {
@@ -379,42 +402,53 @@ public sealed class Snapshotter : IDisposable
             {
                 break;
             }
-            var latest = await _storeBackend.TryLoadLatestAsync(key, ct).ConfigureAwait(false);
-            if (latest is null)
+            var result = await LoadValidStateAsync(key, ct).ConfigureAwait(false);
+            if (result is null)
             {
-                continue;
+                continue; // skipped (missing / corrupted / schema ignored / invalid key)
             }
-            await using var data = latest.Value.Data;
-            PartitionState state;
-            try
-            {
-                state = await _serializer.DeserializeAsync(data, ct).ConfigureAwait(false);
-            }
-            catch
-            {
-                continue; // skip corrupted snapshot
-            }
-            // Fail-fast schema enforcement when ExpectedSchemaVersion specified
-            if (Options.ExpectedSchemaVersion.HasValue && state.SchemaVersion != Options.ExpectedSchemaVersion.Value)
-            {
-                throw new InvalidOperationException($"Snapshot schema mismatch. Expected={Options.ExpectedSchemaVersion.Value} Actual={state.SchemaVersion} Partition={state.PartitionKey}");
-            }
-            // Legacy tolerant path (no expected schema) keeps ignoring non-1 versions for now
-            if (!Options.ExpectedSchemaVersion.HasValue && state.SchemaVersion != 1)
-            {
-                continue;
-            }
-            // Partition key must be integer index
-            if (!int.TryParse(state.PartitionKey, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var p))
-            {
-                continue;
-            }
-            if (_store.TryRestorePartition(p, state.Events))
+            var (state, index) = result.Value;
+            if (_store.TryRestorePartition(index, state.Events))
             {
                 restored++;
             }
         }
         return restored;
+    }
+
+    private async ValueTask<(PartitionState State, int Index)?> LoadValidStateAsync(string key, CancellationToken ct)
+    {
+        var latest = await _storeBackend.TryLoadLatestAsync(key, ct).ConfigureAwait(false);
+        if (latest is null)
+        {
+            return null; // no snapshot
+        }
+        await using var data = latest.Value.Data;
+        PartitionState state;
+        try
+        {
+            state = await _serializer.DeserializeAsync(data, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            return null; // corrupted snapshot
+        }
+        // Schema enforcement
+        if (Options.ExpectedSchemaVersion.HasValue)
+        {
+            if (state.SchemaVersion != Options.ExpectedSchemaVersion.Value)
+            {
+                throw new InvalidOperationException($"Snapshot schema mismatch. Expected={Options.ExpectedSchemaVersion.Value} Actual={state.SchemaVersion} Partition={state.PartitionKey}");
+            }
+        }
+        else if (state.SchemaVersion != 1)
+        {
+            return null; // ignore non-1 when not enforcing
+        }
+        // Partition key must be integer index
+        return !int.TryParse(state.PartitionKey, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var p)
+            ? null
+            : (state, p);
     }
 
     /// <inheritdoc />

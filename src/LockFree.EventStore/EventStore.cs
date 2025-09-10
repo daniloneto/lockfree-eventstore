@@ -28,7 +28,7 @@ public sealed partial class EventStore<TEvent>
 
     private Snapshotter? _snapshotterRef; // published via Volatile.Read/Write for safe publication
     private bool _snapConfigured; // accessed under _snapshotInitLock or via Volatile.Read/Write for publication
-    private readonly object _snapshotInitLock = new();
+    private readonly Lock _snapshotInitLock = new();
 
     /// <summary>
     /// Initializes a new instance with default options.
@@ -1914,60 +1914,46 @@ public sealed partial class EventStore<TEvent>
     internal bool TryGetStableView(string partitionKey, out PartitionState snapshot)
     {
         snapshot = default!;
-        if (typeof(TEvent) != typeof(Event))
-        {
-            return false; // feature only active for Event
-        }
+        if (typeof(TEvent) != typeof(Event)) { return false; } // feature only active for Event
         var partitionCount = GetPartitionCount();
-        if (partitionCount <= 0)
+        if (partitionCount <= 0) { return false; }
+        if (!int.TryParse(partitionKey, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var p) || (uint)p >= (uint)partitionCount)
         {
             return false;
         }
-        if (!int.TryParse(partitionKey, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var p) || p < 0 || p >= partitionCount)
-        {
-            return false;
-        }
-        // Retrieve stable capture max attempts if snapshotter attached
-        var maxAttempts = 1;
-        if (_snapshotterRef is not null)
-        {
-            maxAttempts = _snapshotterRef.Options.StableCaptureMaxAttempts;
-        }
-        if (maxAttempts < 1)
-        {
-            maxAttempts = 1;
-        }
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        var maxAttempts = Math.Max(1, _snapshotterRef?.Options.StableCaptureMaxAttempts ?? 1);
+        bool TryCopy(int idx, out Event[]? eventsArr, out long ver)
         {
             if (_usePadding)
             {
-                if (_paddedPartitions![p].TryCopyStable(out var arr, out var ver))
+                if (_paddedPartitions![idx].TryCopyStable(out var arrObj, out ver))
                 {
-                    snapshot = new PartitionState
-                    {
-                        PartitionKey = partitionKey,
-                        Version = ver,
-                        Events = Unsafe.As<Event[]?>(arr)!,
-                        TakenAt = DateTimeOffset.UtcNow,
-                        SchemaVersion = 1
-                    };
+                    eventsArr = Unsafe.As<Event[]?>(arrObj);
                     return true;
                 }
             }
-            else
+            else if (_partitions![idx].TryCopyStable(out var arrObj2, out ver))
             {
-                if (_partitions![p].TryCopyStable(out var arr, out var ver))
+                eventsArr = Unsafe.As<Event[]?>(arrObj2);
+                return true;
+            }
+            eventsArr = null;
+            ver = 0;
+            return false;
+        }
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            if (TryCopy(p, out var arr, out var ver))
+            {
+                snapshot = new PartitionState
                 {
-                    snapshot = new PartitionState
-                    {
-                        PartitionKey = partitionKey,
-                        Version = ver,
-                        Events = Unsafe.As<Event[]?>(arr)!,
-                        TakenAt = DateTimeOffset.UtcNow,
-                        SchemaVersion = 1
-                    };
-                    return true;
-                }
+                    PartitionKey = partitionKey,
+                    Version = ver,
+                    Events = arr!,
+                    TakenAt = DateTimeOffset.UtcNow,
+                    SchemaVersion = 1
+                };
+                return true;
             }
         }
         return false;

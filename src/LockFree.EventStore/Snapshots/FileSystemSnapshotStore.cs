@@ -100,8 +100,11 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
             finally
             {
                 // Ensure the handle is closed before attempting the atomic move.
-                fs.Dispose();
-                fs = null;
+                if (fs is not null)
+                {
+                    await fs.DisposeAsync().ConfigureAwait(false);
+                    fs = null;
+                }
             }
 
             // Verify temp file still exists (defensive, should always be true)
@@ -126,7 +129,11 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
             {
                 try
                 {
-                    fs?.Dispose();
+                    if (fs is not null)
+                    {
+                        await fs.DisposeAsync().ConfigureAwait(false);
+                        fs = null;
+                    }
                 }
                 catch { /* ignore */ }
                 try
@@ -142,12 +149,12 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
     }
 
     /// <inheritdoc />
-    public ValueTask<(SnapshotMetadata Meta, Stream Data)?> TryLoadLatestAsync(string partitionKey, CancellationToken ct = default)
+    public async ValueTask<(SnapshotMetadata Meta, Stream Data)?> TryLoadLatestAsync(string partitionKey, CancellationToken ct = default)
     {
         var dir = PartitionDir(_root, partitionKey);
         if (!Directory.Exists(dir))
         {
-            return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>(null);
+            return null;
         }
         var files = Directory.EnumerateFiles(dir, "*.snap", SearchOption.TopDirectoryOnly);
         SnapshotMetadata? bestMeta = null;
@@ -178,12 +185,14 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
         }
         if (bestMeta is null || bestPath is null)
         {
-            return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>(null);
+            return null;
         }
-        // Use broad FileShare to allow deletion while stream still open (tests clean up directories immediately on Windows).
-        // Ownership of the returned FileStream is transferred to the caller who MUST dispose it.
-        return ValueTask.FromResult<(SnapshotMetadata Meta, Stream Data)?>(
-            (bestMeta.Value, new FileStream(bestPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete)));
+        // Open, copy into memory, then dispose the file stream so callers don't need to manage file handle lifetime.
+        await using var fs = new FileStream(bestPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var ms = new MemoryStream(capacity: (int)Math.Min(fs.Length, int.MaxValue));
+        await fs.CopyToAsync(ms, ct).ConfigureAwait(false);
+        ms.Position = 0;
+        return (bestMeta.Value, ms);
     }
 
     /// <inheritdoc />
@@ -209,39 +218,26 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
         {
             return;
         }
+
         var entries = new List<(FileInfo File, long Version, long Ticks)>();
         foreach (var path in Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly))
         {
             ct.ThrowIfCancellationRequested();
-            if (path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
+            if (TryParseSnapshotEntry(path, out var entry))
             {
-                continue; // ignore temp
+                entries.Add(entry);
             }
-            if (!path.EndsWith(".snap", StringComparison.OrdinalIgnoreCase))
-            {
-                continue; // ignore other files
-            }
-            var name = Path.GetFileNameWithoutExtension(path);
-            var parts = name.Split('_');
-            if (parts.Length < 3)
-            {
-                continue;
-            }
-            if (!long.TryParse(parts[^2], out var version))
-            {
-                continue;
-            }
-            if (!long.TryParse(parts[^1], out var ticks))
-            {
-                continue;
-            }
-            entries.Add((new FileInfo(path), version, ticks));
         }
+
         if (entries.Count <= snapshotsToKeep)
         {
             return;
         }
-        var ordered = entries.OrderByDescending(e => e.Version).ThenByDescending(e => e.Ticks).ToList();
+
+        var ordered = entries
+            .OrderByDescending(e => e.Version)
+            .ThenByDescending(e => e.Ticks)
+            .ToList();
         var toDelete = ordered.Skip(snapshotsToKeep).ToList();
         var deleted = 0;
         foreach (var e in toDelete)
@@ -256,7 +252,6 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
                 // ignore
             }
         }
-        // Trace pruning if there is an active snapshot Activity
         var act = System.Diagnostics.Activity.Current;
         if (act != null && act.OperationName == "snapshot.save")
         {
@@ -266,6 +261,36 @@ public sealed partial class FileSystemSnapshotStore : ISnapshotStore // made par
             _ = act.AddTag("prune.kept", snapshotsToKeep);
         }
         await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    private static bool TryParseSnapshotEntry(string path, out (FileInfo File, long Version, long Ticks) entry)
+    {
+        entry = default;
+        // Exclude temp files quickly.
+        if (path.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        if (!path.EndsWith(".snap", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        var name = Path.GetFileNameWithoutExtension(path);
+        var parts = name.Split('_');
+        if (parts.Length < 3)
+        {
+            return false;
+        }
+        if (!long.TryParse(parts[^2], out var version))
+        {
+            return false;
+        }
+        if (!long.TryParse(parts[^1], out var ticks))
+        {
+            return false;
+        }
+        entry = (new FileInfo(path), version, ticks);
+        return true;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

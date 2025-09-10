@@ -68,54 +68,8 @@ public sealed class BinarySnapshotSerializer(bool compress = false) : ISnapshotS
             var version = br.ReadInt64();
             var takenAtTicks = br.ReadInt64();
             var count = br.ReadInt32();
-
-            // Basic validations
-            if (count < 0)
-            {
-                throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Negative event count: {count}");
-            }
-            const int MaxEvents = 10_000_000; // safety upper bound (tunable)
-            if (count > MaxEvents)
-            {
-                throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Event count {count} exceeds limit {MaxEvents}");
-            }
-            if (version < 0)
-            {
-                throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Negative version: {version}");
-            }
-            // Ticks sanity (DateTimeOffset supports a wide range; optionally reject far-future/past)
-            if (takenAtTicks < DateTimeOffset.MinValue.UtcTicks || takenAtTicks > DateTimeOffset.MaxValue.UtcTicks)
-            {
-                throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"TakenAt ticks out of range: {takenAtTicks}");
-            }
-
-            var arr = new Event[count];
-            for (var i = 0; i < count; i++)
-            {
-                try
-                {
-                    var keyVal = br.ReadInt32();
-                    var value = br.ReadDouble();
-                    var ts = br.ReadInt64();
-                    arr[i] = new Event(new KeyId(keyVal), value, ts);
-                }
-                catch (EndOfStreamException eof)
-                {
-                    throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Unexpected end of stream reading event {i}", eof);
-                }
-                catch (IOException ioex)
-                {
-                    throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"I/O error reading event {i}", ioex);
-                }
-                catch (ArgumentOutOfRangeException oore)
-                {
-                    throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Value out of range reading event {i}", oore);
-                }
-                catch (FormatException fe)
-                {
-                    throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Format error reading event {i}", fe);
-                }
-            }
+            ValidateHeader(partitionKey, schema, version, takenAtTicks, count, startPos);
+            var arr = ReadEvents(br, count, partitionKey, schema, startPos);
             return new PartitionState
             {
                 PartitionKey = partitionKey,
@@ -143,6 +97,60 @@ public sealed class BinarySnapshotSerializer(bool compress = false) : ISnapshotS
         }
     }
 
+    private const int MaxEvents = 10_000_000; // safety upper bound (tunable)
+
+    private static void ValidateHeader(string? partitionKey, int schema, long version, long takenAtTicks, int count, long startPos)
+    {
+        if (count < 0)
+        {
+            throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Negative event count: {count}");
+        }
+        if (count > MaxEvents)
+        {
+            throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Event count {count} exceeds limit {MaxEvents}");
+        }
+        if (version < 0)
+        {
+            throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Negative version: {version}");
+        }
+        if (takenAtTicks < DateTimeOffset.MinValue.UtcTicks || takenAtTicks > DateTimeOffset.MaxValue.UtcTicks)
+        {
+            throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"TakenAt ticks out of range: {takenAtTicks}");
+        }
+    }
+
+    private static Event[] ReadEvents(BinaryReader br, int count, string? partitionKey, int schema, long startPos)
+    {
+        var arr = new Event[count];
+        for (var i = 0; i < count; i++)
+        {
+            try
+            {
+                var keyVal = br.ReadInt32();
+                var value = br.ReadDouble();
+                var ts = br.ReadInt64();
+                arr[i] = new Event(new KeyId(keyVal), value, ts);
+            }
+            catch (EndOfStreamException eof)
+            {
+                throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Unexpected end of stream reading event {i}", eof);
+            }
+            catch (IOException ioex)
+            {
+                throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"I/O error reading event {i}", ioex);
+            }
+            catch (ArgumentOutOfRangeException oore)
+            {
+                throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Value out of range reading event {i}", oore);
+            }
+            catch (FormatException fe)
+            {
+                throw new SnapshotDeserializationException(partitionKey, schema, startPos, $"Format error reading event {i}", fe);
+            }
+        }
+        return arr;
+    }
+
     private static async ValueTask<PartitionState> DeserializeCompressedAsync(Stream source)
     {
         using var gz = new GZipStream(source, CompressionMode.Decompress, leaveOpen: true);
@@ -152,14 +160,26 @@ public sealed class BinarySnapshotSerializer(bool compress = false) : ISnapshotS
     }
 }
 
-// Added custom exception for clearer snapshot deserialization failures.
-internal sealed class SnapshotDeserializationException(string? partitionKey, int? schemaVersion, long startPosition, string message, Exception? inner = null)
+/// <summary>
+/// Exception thrown when a snapshot cannot be deserialized due to invalid or corrupt data.
+/// Provides context such as partition key, schema version and the starting position in the stream.
+/// </summary>
+/// <param name="partitionKey">The partition key read from the snapshot (if available).</param>
+/// <param name="schemaVersion">The schema version read from the snapshot header (if available).</param>
+/// <param name="startPosition">The starting position of the snapshot within the source stream (if seekable).</param>
+/// <param name="message">Error description.</param>
+/// <param name="inner">Inner exception that triggered the failure (if any).</param>
+public sealed class SnapshotDeserializationException(string? partitionKey, int? schemaVersion, long startPosition, string message, Exception? inner = null)
     : Exception(message, inner)
 {
+    /// <summary>Partition key of the snapshot (may be null if header parse failed).</summary>
     public string? PartitionKey { get; } = partitionKey;
+    /// <summary>Schema version of the snapshot (may be null if header parse failed).</summary>
     public int? SchemaVersion { get; } = schemaVersion;
+    /// <summary>The stream position where deserialization began (or -1 if not seekable).</summary>
     public long StartPosition { get; } = startPosition;
 
+    /// <inheritdoc />
     public override string ToString()
     {
         return string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{base.ToString()} (PartitionKey={PartitionKey ?? "<unknown>"}, Schema={(SchemaVersion.HasValue ? SchemaVersion.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "<unknown>")}, StartPos={StartPosition})");
