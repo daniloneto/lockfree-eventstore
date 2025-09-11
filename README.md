@@ -464,32 +464,6 @@ if (restored > 0 && store.TryGetSnapshotMetrics(out var metrics))
 ### Exemplos de Snapshots
 Dois projetos de exemplo demonstram o uso prático do subsistema de snapshots persistentes:
 
-#### 1. SnapshotSensors (Console)
-Workload sintético de sensores (temperatura + umidade) em alta frequência demonstrando:
-- Warm start: restaura o ring buffer a partir dos snapshots mais recentes no boot
-- Capturas periódicas (gatilho de tempo + contagem de eventos)
-- Snapshot final gracioso no shutdown (`FinalSnapshotOnShutdown=true`)
-- Escrita atômica (`.snap.tmp` → rename para `.snap`)
-- Pruning mantendo somente os N últimos por partição
-- Métricas impressas periodicamente (Append, Dropped, SnapshotBytes, DroppedJobs, StableFailures)
-
-Executar:
-```bash
-dotnet run --project samples/SnapshotSensors/SnapshotSensors.csproj
-```
-Interrompa (Ctrl+C), execute novamente e observe a linha:
-```
-[BOOT] Partitions restauradas de snapshot: X
-```
-Se X > 0 houve warm start.
-
-Principais parâmetros (Program.cs):
-- Interval = 5s
-- MinEventsBetweenSnapshots = 100.000
-- SnapshotsToKeep = 3
-- FinalSnapshotOnShutdown = true (timeout 3s)
-- Compressão habilitada (`BinarySnapshotSerializer(compress: true)`)
-
 #### 2. SnapshotSensorsApi (Minimal API)
 API HTTP que recebe leituras JSON e expõe estado e métricas:
 - POST /sensor → gera dois eventos (temperatura chave=1, umidade chave=2) distribuídos por partições
