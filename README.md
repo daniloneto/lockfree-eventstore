@@ -8,6 +8,7 @@
 Um armazenador de eventos em memória, super rápido, **sem travas (lock-free)**, com partições e suporte a consultas por janelas de tempo.
 
 ---
+CodeWiki: [https://codewiki.google](https://codewiki.google/github.com/daniloneto/lockfree-eventstore)]
 
 ## ✨ O que é
 
